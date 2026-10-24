@@ -6,7 +6,9 @@ solo se ejecuta si la política la permite y el usuario la confirma.
 """
 import os
 import re
+import errno
 import secrets
+import stat
 import subprocess
 import time
 
@@ -220,12 +222,52 @@ class Assistant:
     def _write_confirmed(self, entry):
         from .agente import check_path
         p = check_path(entry["ruta"])                       # revalidar
-        if os.path.exists(p):
-            with open(p, "rb") as src, open(p + ".atlas-bak", "wb") as dst:
-                dst.write(src.read())
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as fh:
-            fh.write(entry["contenido"])
+        home = os.path.realpath(os.path.expanduser("~"))
+        if not p.startswith(home + "/"):
+            raise PermissionError("ATLAS solo escribe archivos dentro de tu carpeta personal")
+        # Entre la validación y la escritura otro proceso podría cambiar una
+        # carpeta o el archivo por un enlace simbólico. Se recorre la ruta
+        # desde $HOME con descriptores y O_NOFOLLOW: nunca se sigue un enlace.
+        parts = os.path.relpath(p, home).split("/")
+        dfd = _open_dir_nofollow(home, parts[:-1])
+        try:
+            name = parts[-1]
+            try:
+                src = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+            except FileNotFoundError:
+                src = None
+            except OSError as ex:
+                if ex.errno == errno.ELOOP:
+                    raise PermissionError(f"{p} es un enlace simbólico; ATLAS no lo sigue") from ex
+                raise
+            if src is not None:
+                try:
+                    _check_regular(src, p)
+                    try:
+                        bak = os.open(name + ".atlas-bak", _WRITE_FLAGS, 0o600, dir_fd=dfd)
+                    except OSError as ex:
+                        raise PermissionError(f"no se pudo crear la copia {p}.atlas-bak "
+                                              f"de forma segura: {ex}") from ex
+                    with os.fdopen(bak, "wb") as dst:
+                        _check_regular(dst.fileno(), p + ".atlas-bak")
+                        dst.truncate(0)
+                        with os.fdopen(os.dup(src), "rb") as fh:
+                            dst.write(fh.read())
+                finally:
+                    os.close(src)
+            try:
+                out = os.open(name, _WRITE_FLAGS, 0o644, dir_fd=dfd)
+            except OSError as ex:
+                if ex.errno == errno.ELOOP:
+                    raise PermissionError(f"{p} es un enlace simbólico; ATLAS no lo sigue") from ex
+                raise
+            with os.fdopen(out, "w",
+                           encoding="utf-8") as fh:
+                _check_regular(fh.fileno(), p)
+                fh.truncate(0)
+                fh.write(entry["contenido"])
+        finally:
+            os.close(dfd)
         return {"codigo": 0, "salida": f"escrito {p}", "error": ""}
 
     def run_confirmed(self, nonce, cwd=None):
@@ -252,6 +294,42 @@ class Assistant:
         except subprocess.TimeoutExpired:
             return {"codigo": -1, "salida": "", "error": "tiempo agotado"}
         return {"codigo": r.returncode, "salida": r.stdout[-20000:], "error": r.stderr[-5000:]}
+
+
+# Sin O_TRUNC: se trunca solo después de comprobar que es un archivo normal.
+_WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_dir_nofollow(base, parts):
+    """Descriptor de base/parts[0]/…, creando carpetas que falten y sin seguir
+    ningún enlace simbólico."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    dfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts:
+            try:
+                nfd = os.open(part, flags, dir_fd=dfd)
+            except FileNotFoundError:
+                os.mkdir(part, 0o755, dir_fd=dfd)
+                nfd = os.open(part, flags, dir_fd=dfd)
+            except OSError as ex:
+                raise PermissionError(f"{part} no es una carpeta normal (¿enlace simbólico?)") from ex
+            os.close(dfd)
+            dfd = nfd
+    except BaseException:
+        os.close(dfd)
+        raise
+    return dfd
+
+
+def _check_regular(fd, path):
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise PermissionError(f"{path} no es un archivo normal")
+    if st.st_uid != os.geteuid():
+        raise PermissionError(f"{path} no es tuyo")
+    if st.st_nlink > 1:
+        raise PermissionError(f"{path} tiene enlaces duros; ATLAS no lo sobrescribe")
 
 
 def _quote(a):

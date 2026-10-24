@@ -9,6 +9,16 @@ Evidencia (kernel 6.18, discos loop desechables, ver AUDITORIA-CLAUDE.md §6):
   * Un sistema de archivos montado en RW ANTES del bloqueo sigue escribiendo.
     Por eso `lockdown` se ejecuta al arrancar, antes de udisks, y aborta si
     encuentra montajes RW en discos protegidos.
+  * Lo mismo vale para capas apiladas (device-mapper: LVM, LUKS abierto;
+    md: RAID) activadas ANTES del bloqueo: ya tienen abierto el disco de
+    abajo y el indicador RO de este no detiene sus escrituras (el kernel
+    solo lo comprueba al abrir; en el envío de bios solo avisa). Por eso
+    `lockdown`, `unlock` y `verify` fallan cerrados (código 4/5) si un disco
+    o partición protegido tiene «holders» en sysfs, y además marcan RO esas
+    capas. NO VERIFICADO en VM todavía (T-dm/LVM/MD pendiente).
+  * Fuera de alcance: comandos administrativos NVMe/SCSI (passthrough), el
+    firmware y un root que desactive el bloqueo a propósito. Esto evita
+    errores de particionado/instalación; no es una protección absoluta.
 
 Subcomandos:
   status                         muestra el estado RO de cada disco/partición
@@ -52,15 +62,63 @@ def protected_nodes(disk):
     return [disk.get("path")] + [p.get("path") for p in ns.partitions(disk)]
 
 
-def rw_mounts(disk):
+def _rdev(path):
+    try:
+        st = os.stat(path)
+    except (OSError, TypeError):
+        return None
+    return st.st_rdev if st.st_rdev else None
+
+
+def rw_mounts(disk, extra=()):
+    """Montajes RW del disco, de cualquier descendiente (también /dev/mapper,
+    comparando por número de dispositivo y no solo por nombre) o de extra."""
     bad = []
-    with open("/proc/self/mounts", encoding="utf-8") as fh:
+    with open(os.environ.get("NOVORA_MOUNTS", "/proc/self/mounts"), encoding="utf-8") as fh:
         mounts = [ln.split() for ln in fh]
-    paths = {n.get("path") for n in ns.walk(disk)}
+    paths = {n.get("path") for n in ns.walk(disk)} | set(extra)
+    rdevs = {r for r in map(_rdev, paths) if r}
     for src, mnt, _fs, opts, *_ in mounts:
-        if src in paths and "rw" in opts.split(","):
+        if "rw" not in opts.split(","):
+            continue
+        if src in paths or (src.startswith("/dev/") and _rdev(src) in rdevs):
             bad.append((src, mnt))
     return bad
+
+
+def holders(node):
+    """Capas apiladas (dm-*, md*) que tienen abierto el nodo, recursivamente
+    (p. ej. partición → dm-0 LUKS → dm-1 LVM)."""
+    out, todo = [], [os.path.basename(node or "")]
+    while todo:
+        name = todo.pop()
+        try:
+            hs = sorted(os.listdir(os.path.join(SYSFS_BLOCK, name, "holders")))
+        except OSError:
+            continue
+        for h in hs:
+            dev = "/dev/" + h
+            if dev not in out:
+                out.append(dev)
+                todo.append(h)
+    return out
+
+
+def stacked(nodes):
+    """{nodo protegido: [capas]} para los nodos con capas activas."""
+    found = {}
+    for n in nodes:
+        hs = holders(n)
+        if hs:
+            found[n] = hs
+    return found
+
+
+def report_stacked(found, verb="NO SEGURO"):
+    for node, hs in sorted(found.items()):
+        print(f"{verb}: {node} tiene capas activas {hs} (LVM, LUKS abierto o "
+              "RAID) que pueden seguir escribiendo aunque el disco esté en RO. "
+              "Desactívalas o arranca sin ellas.", file=sys.stderr)
 
 
 def efivars_ro():
@@ -108,7 +166,18 @@ def cmd_lockdown(tree):
     for d in ns.disks(tree):
         for node in protected_nodes(d):
             set_ro(node, True)
-        bad = rw_mounts(d)
+    found = stacked(listed | set(sysfs_nodes()))
+    layers = sorted({h for hs in found.values() for h in hs})
+    for layer in layers:          # que nada nuevo las abra en RW
+        try:
+            set_ro(layer, True)
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    if found:
+        report_stacked(found)
+        rc = 4
+    for d in ns.disks(tree):
+        bad = rw_mounts(d, layers)
         if bad:
             print(f"NO SEGURO: {d.get('path')} tenía montajes RW antes del "
                   f"bloqueo y pueden seguir escribiendo: {bad}", file=sys.stderr)
@@ -147,6 +216,10 @@ def cmd_unlock(tree, allow, apply):
         if (p.get("partuuid") or "").lower() in allowed and ns.mounted_anywhere(p):
             print(f"CANCELADO: {p.get('path')} está montada.", file=sys.stderr)
             return 4
+    found = stacked(protected_nodes(disk) + others)
+    if found:
+        report_stacked(found, "CANCELADO")
+        return 4
     print(f"Plan: RW {rw}\n      RO (mismo disco) {ro}\n      RO (otros) {others}")
     if not apply:
         print("Simulación: no se cambió nada. Usa --apply.")
@@ -185,6 +258,10 @@ def cmd_verify(tree, allow):
         return 5
     errors = [n for n in others + ro if ro_flag(n) is not True]
     errors += [n for n in rw if ro_flag(n) is not False]
+    found = stacked(others + ro)
+    if found:
+        report_stacked(found, "VERIFICACIÓN FALLIDA")
+        errors += sorted(found)
     if errors:
         print(f"VERIFICACIÓN FALLIDA: estado RO inesperado en {errors}",
               file=sys.stderr)

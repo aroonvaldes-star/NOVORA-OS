@@ -4,7 +4,10 @@
   * Base en ~/.local/share/novora-atlas/memoria.db (permisos 0600).
   * Solo se lee: ATLAS nunca modifica los archivos que indexa.
   * Se omiten carpetas y archivos ocultos (.ssh, .gnupg, .config…), enlaces
-    simbólicos y rutas de sistema (/dev, /proc, /sys, /run, /boot).
+    simbólicos y rutas de sistema (/dev, /proc, /sys, /run, /boot). También
+    se rechaza indexar DIRECTAMENTE una ruta oculta (p. ej. ~/.ssh/id_rsa o
+    un enlace hacia ella), y las búsquedas nunca devuelven trozos de rutas
+    ocultas que hubieran quedado de versiones anteriores.
 """
 import os
 import re
@@ -65,6 +68,11 @@ def _is_system(path):
 
 def _hidden(name):
     return name.startswith(".")
+
+
+def _hidden_path(path):
+    """¿Algún componente de la ruta (ya resuelta) es oculto?"""
+    return any(_hidden(part) for part in path.split("/") if part)
 
 
 def chunk_text(text, size=CHUNK, overlap=OVERLAP):
@@ -136,6 +144,9 @@ def index(paths, progress=None):
                     raise MemoriaError(f"no existe: {raw}")
                 if _is_system(root):
                     raise MemoriaError(f"ATLAS no indexa rutas de sistema ({root})")
+                if _hidden_path(root):
+                    raise MemoriaError(f"ATLAS no indexa archivos ni carpetas ocultos ({root}): "
+                                       "ahí suele haber claves y configuración")
                 for path in _walk(root):
                     count += 1
                     if count > MAX_FILES:
@@ -202,7 +213,8 @@ def search(query, k=8):
             raise MemoriaError(f"consulta no válida: {ex}") from ex
         finally:
             con.close()
-    return [{"ruta": r[0], "trozo": r[1], "texto": r[2], "puntuacion": round(-r[3], 3)} for r in rows]
+    return [{"ruta": r[0], "trozo": r[1], "texto": r[2], "puntuacion": round(-r[3], 3)}
+            for r in rows if not _hidden_path(r[0])]
 
 
 def stats():
@@ -240,10 +252,13 @@ def refresh():
             paths = [r[0] for r in con.execute("SELECT ruta FROM docs")]
         finally:
             con.close()
-    gone = [p for p in paths if not os.path.isfile(p)]
+    # Lo que ya no existe y lo indexado antes de que se prohibieran las rutas
+    # ocultas se olvida.
+    gone = [p for p in paths if not os.path.isfile(p) or _hidden_path(p)]
     for p in gone:
         forget(p)
-    live = [p for p in paths if os.path.isfile(p)]
+    gone_set = set(gone)
+    live = [p for p in paths if p not in gone_set]
     st = index(live) if live else {"nuevos": 0, "actualizados": 0, "sin_cambios": 0, "omitidos": 0, "trozos": 0}
     st["eliminados"] = len(gone)
     return st

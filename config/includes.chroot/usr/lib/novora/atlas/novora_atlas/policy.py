@@ -62,6 +62,29 @@ GIT_READ = {"status", "log", "diff", "show", "branch", "remote", "blame",
 SHELL_OPERATORS = re.compile(r"[;&|<>`$(){}\n\\*?\[\]!~]")
 FIND_DANGEROUS = {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint",
                   "-fprintf", "-fls"}
+# Opciones de programas de READ_ONLY que escriben archivos, cambian el sistema
+# o ejecutan otro programa: (letras de opción corta, prefijos de opción larga).
+# Con cualquiera de ellas la orden deja de ser de solo lectura → CONFIRMAR.
+WRITING_OPTIONS = {
+    "sort": ("oT", ("--output", "--compress-program", "--temporary-directory")),
+    "tree": ("oRH", ("--output",)),
+    "file": ("C", ("--compile",)),
+    "date": ("sf", ("--set", "--file")),
+    "rg": ("", ("--pre",)),
+}
+# Opciones globales de git (antes del subcomando): -c, -C, --git-dir,
+# --exec-path, --config-env… cambian qué se ejecuta o dónde. Ninguna se
+# acepta como solo lectura.
+GIT_WRITING_OPTIONS = ("--output", "--ext-diff", "--textconv", "--exec",
+                       "--upload-pack", "--receive-pack", "--open-files-in-pager")
+# branch, tag y remote solo listan con estas opciones; con un nombre crean,
+# borran o renombran.
+GIT_LIST_ONLY = {
+    "branch": {"-a", "-r", "-v", "-vv", "-l", "--all", "--remotes", "--list",
+               "--verbose", "--show-current", "--no-color"},
+    "tag": {"-l", "--list", "-n"},
+    "remote": {"-v", "--verbose"},
+}
 
 
 class Verdict:
@@ -81,6 +104,25 @@ class Verdict:
 
 def _base(word):
     return os.path.basename(word)
+
+
+def _writing_option(prog, args):
+    """Primera opción de args que hace que un programa de READ_ONLY escriba o
+    ejecute algo, o None."""
+    short, longs = WRITING_OPTIONS.get(prog, ("", ()))
+    for a in args:
+        if a == "--":
+            break
+        if a.startswith("--"):
+            if a.split("=", 1)[0].startswith(longs) and longs:
+                return a
+        elif a.startswith("-") and len(a) > 1 and any(c in short for c in a[1:]):
+            return a
+    if prog == "uniq":                      # uniq ENTRADA SALIDA escribe SALIDA
+        operands = [a for a in args if not a.startswith("-")]
+        if len(operands) > 1:
+            return operands[1]
+    return None
 
 
 def classify(command):
@@ -122,14 +164,29 @@ def classify(command):
     if prog == "find" and any(a in FIND_DANGEROUS for a in argv[1:]):
         return Verdict(FORBIDDEN, "find con -exec/-delete no está permitido")
     if prog == "git":
-        sub = next((a for a in argv[1:] if not a.startswith("-")), "")
-        if sub in GIT_READ:
+        sub = argv[1] if len(argv) > 1 else ""
+        if sub.startswith("-"):
+            return Verdict(CONFIRM, f"git con opción global {sub} (puede cambiar "
+                           "la configuración o el programa que se ejecuta)", argv)
+        rest = argv[2:]
+        bad = next((a for a in rest if a.split("=", 1)[0] in GIT_WRITING_OPTIONS
+                    or (a.startswith("-") and not a.startswith("--") and "O" in a)), None)
+        if not bad and sub in GIT_LIST_ONLY:
+            bad = next((a for a in rest if a not in GIT_LIST_ONLY[sub]), None)
+        if sub in GIT_READ and not bad:
             return Verdict(ALLOWED, f"git {sub} (solo lectura)", argv)
+        if bad:
+            return Verdict(CONFIRM, f"git {sub} con {bad} puede escribir archivos, "
+                           "modificar el repositorio o ejecutar otro programa", argv)
         return Verdict(CONFIRM, f"git {sub or '?'} puede modificar el "
                        "repositorio", argv)
     if prog in ("sed", "perl") and any(a.startswith("-i") for a in argv[1:]):
         return Verdict(CONFIRM, "edita archivos en el lugar", argv)
     if prog in READ_ONLY:
+        bad = _writing_option(prog, argv[1:])
+        if bad:
+            return Verdict(CONFIRM, f"'{prog}' con {bad} escribe archivos, cambia "
+                           "el sistema o ejecuta otro programa", argv)
         return Verdict(ALLOWED, f"{prog} (solo lectura)", argv)
     return Verdict(CONFIRM, f"'{prog}' puede modificar archivos o el sistema",
                    argv)

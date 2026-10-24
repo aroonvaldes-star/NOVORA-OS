@@ -153,9 +153,22 @@ class Policy(unittest.TestCase):
                  "mount -o remount,rw /", "cryptsetup open /dev/sdb2 x", "bash",
                  "novora-gpu usar-nvidia rm -rf proyecto", "prime-run sh script.sh",
                  "gamemoderun sh script.sh"]
-    ALLOWED = ["ls -la", "git status", "git log --oneline", "df -h", "lsblk", "cat notas.txt"]
+    ALLOWED = ["ls -la", "git status", "git log --oneline", "df -h", "lsblk", "cat notas.txt",
+               "sort -r -n datos.txt", "uniq -c datos.txt", "git branch -a", "git remote -v",
+               "git tag --list", "file informe.pdf", "date +%F"]
     CONFIRM = ["git commit -m arreglo", "python3 script.py", "mkdir proyecto", "cp a.txt b.txt",
-               "npm test", "sed -i s/a/b/ archivo.txt"]
+               "npm test", "sed -i s/a/b/ archivo.txt",
+               # R-01: programas de lectura con opciones que escriben o ejecutan
+               "sort -o salida.txt entrada.txt", "sort --output=salida.txt entrada.txt",
+               "sort -ro salida.txt entrada.txt", "sort --compress-program=./x entrada.txt",
+               "tree -o salida.txt proyecto", "tree -R -H . proyecto", "uniq entrada.txt salida.txt",
+               "file -C -m magia", "date -s 2020-01-01", "rg --pre ./x TODO",
+               "git -c core.fsmonitor=./programa status", "git -ccore.fsmonitor=./programa status",
+               "git --config-env=core.fsmonitor=HOME status", "git -C otro status",
+               "git --git-dir=otro/.git log", "git --exec-path=./x status",
+               "git diff --output=salida.txt", "git log -p --ext-diff", "git show --textconv HEAD",
+               "git grep -O TODO", "git branch nueva", "git branch -D main", "git tag v1",
+               "git remote add origen x"]
 
     def test_forbidden(self):
         for c in self.FORBIDDEN:
@@ -321,6 +334,20 @@ class Web(unittest.TestCase):
 
     def test_foreign_origin_rejected(self):
         self.assertEqual(self.req("POST", "/api/chat", {"texto": "x"}, origin="http://evil.example")[0], 403)
+
+    def test_bad_content_length_rejected(self):
+        """R-03: Content-Length negativo o no numérico → 400 sin leer hasta EOF."""
+        import socket
+        for value in ("-1", "abc", "1e3", "+5", "١٢"):
+            with self.subTest(v=value):
+                s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+                try:
+                    s.sendall((f"POST /api/chat HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
+                               f"X-Atlas-Token: T0KEN\r\nContent-Type: application/json\r\n"
+                               f"Content-Length: {value}\r\n\r\n").encode())
+                    self.assertIn(b" 400 ", s.recv(4096).split(b"\r\n")[0] + b" ")
+                finally:
+                    s.close()
 
     def test_requires_json(self):
         self.assertEqual(self.req("POST", "/api/chat", b"texto=x", ctype="text/plain")[0], 400)
@@ -687,6 +714,31 @@ class Memoria(unittest.TestCase):
             memoria.search(q)                       # nunca lanza error de sintaxis FTS
         self.assertGreater(memoria.stats()["documentos"], 0)
 
+    def test_hidden_roots_refused_even_via_symlink(self):
+        _w(f"{HOME}/.ssh/id_rsa.txt", "presupuesto CLAVE-PRIVADA\n")
+        _w(f"{HOME}/.config/app/x.json", '{"token": "presupuesto"}\n')
+        link = f"{self.docs}/enlace-ssh"
+        os.symlink(f"{HOME}/.ssh", link)
+        for bad in ("~/.ssh", "~/.ssh/id_rsa.txt", "~/.config", f"{self.docs}/.secreto", link):
+            with self.subTest(ruta=bad), self.assertRaises(memoria.MemoriaError):
+                memoria.index([bad])
+        self.assertNotIn("CLAVE-PRIVADA", json.dumps(memoria.search("presupuesto", k=50)))
+
+    def test_old_hidden_entries_never_returned_and_purged(self):
+        _w(f"{self.docs}/.secreto/viejo.md", "presupuesto ANTIGUO-SECRETO\n")
+        con = memoria._connect()                    # simula un índice de la versión 0.1.1
+        con.execute("INSERT INTO trozos(ruta, n, texto) VALUES (?,?,?)",
+                    (f"{self.docs}/.secreto/viejo.md", 0, "presupuesto ANTIGUO-SECRETO"))
+        con.execute("INSERT INTO docs VALUES (?,?,?,?,?)",
+                    (f"{self.docs}/.secreto/viejo.md", 0, 0, "x", 1))
+        con.commit()
+        con.close()
+        self.assertNotIn("ANTIGUO-SECRETO", json.dumps(memoria.search("presupuesto antiguo", k=50)))
+        self.assertGreaterEqual(memoria.refresh()["eliminados"], 1)
+        con = memoria._connect()
+        self.assertIsNone(con.execute("SELECT 1 FROM docs WHERE ruta LIKE '%/.secreto/%'").fetchone())
+        con.close()
+
     def test_system_paths_refused_and_chunks_overlap(self):
         with self.assertRaises(memoria.MemoriaError):
             memoria.index(["/proc/self"])
@@ -754,13 +806,56 @@ class Agente(unittest.TestCase):
         with open(f"{HOME}/proyecto/main.py.atlas-bak") as fh:
             self.assertIn("TODO", fh.read())
 
+    def test_confirmed_write_never_follows_symlinks(self):
+        """R-02: si tras la propuesta el destino o una carpeta se cambia por un
+        enlace simbólico, la escritura confirmada se rechaza."""
+        p = self.a.propose_write("~/proyecto/README.md", "texto de ATLAS")
+        os.symlink(f"{HOME}/.bashrc", f"{HOME}/proyecto/README.md")
+        try:
+            with self.assertRaises(PermissionError):
+                self.a.run_confirmed(p["confirmacion"])
+        finally:
+            os.remove(f"{HOME}/proyecto/README.md")
+        with open(f"{HOME}/.bashrc") as fh:
+            self.assertEqual(fh.read(), "export X=1\n")
+        outside = tempfile.mkdtemp()
+        p = self.a.propose_write("~/carpeta-cambiada/x.txt", "texto")
+        os.symlink(outside, f"{HOME}/carpeta-cambiada")
+        try:
+            with self.assertRaises(PermissionError):
+                self.a.run_confirmed(p["confirmacion"])
+        finally:
+            os.remove(f"{HOME}/carpeta-cambiada")
+        self.assertEqual(os.listdir(outside), [])
+        p = self.a.propose_write("~/proyecto/main.py", "nuevo")     # copia .atlas-bak como enlace
+        os.symlink(f"{HOME}/.bashrc", f"{HOME}/proyecto/main.py.atlas-bak")
+        try:
+            with self.assertRaises(PermissionError):
+                self.a.run_confirmed(p["confirmacion"])
+        finally:
+            os.remove(f"{HOME}/proyecto/main.py.atlas-bak")
+        with open(f"{HOME}/.bashrc") as fh:
+            self.assertEqual(fh.read(), "export X=1\n")
+
+    def test_confirmed_write_refuses_hardlinks(self):
+        os.link(f"{HOME}/.bashrc", f"{HOME}/proyecto/duro.txt")
+        try:
+            p = self.a.propose_write("~/proyecto/duro.txt", "x")
+            with self.assertRaises(PermissionError):
+                self.a.run_confirmed(p["confirmacion"])
+        finally:
+            os.remove(f"{HOME}/proyecto/duro.txt")
+
     def test_auto_runnable_rules(self):
         def auto(cmd):
             return agente.auto_runnable(policy.classify(cmd), HOME)[0]
         self.assertTrue(auto("ls proyecto"))
         self.assertTrue(auto("cat proyecto/main.py"))
-        self.assertTrue(auto("git status"))
-        for cmd in ("cat .ssh/id_rsa", "cat ~/.bashrc", "grep -rn TODO proyecto", "rg TODO", "tree",
+        self.assertFalse(auto("git status"))     # .git/config puede ejecutar programas
+        self.assertTrue(auto("sort -r proyecto/main.py"))
+        for cmd in ("sort -o salida.txt proyecto/main.py", "uniq proyecto/main.py salida.txt",
+                    "git -ccore.fsmonitor=/tmp/x status", "git diff --output=x.txt",
+                    "cat .ssh/id_rsa", "cat ~/.bashrc", "grep -rn TODO proyecto", "rg TODO", "tree",
                     "ls -R proyecto", "git commit -m x", "cat /etc/passwd", "head --file=.bashrc"):
             self.assertFalse(auto(cmd), cmd)
 
