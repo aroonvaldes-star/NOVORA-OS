@@ -109,7 +109,25 @@ for n in "${SEA}p2" "${SEA}p3"; do expect_rw "${n}" unlock; done
 if mkfs.ext4 -q -F "${WIN}p2" 2>/dev/null; then bad "mkfs en disco Windows"; else ok "mkfs en disco Windows rechazado"; fi
 
 echo "4) relectura de tabla en el Seagate (como haría un particionador)"
-partx -d "${SEA}" 2>/dev/null || true; partx -a "${SEA}"
+# Relectura completa y fiable: udev (en servidores de CI) puede tener abierta una
+# partición un instante y entonces partx -d no la quita; se espera y se reintenta.
+reread() {
+  local _
+  for _ in $(seq 1 20); do
+    command -v udevadm >/dev/null && udevadm settle 2>/dev/null || true
+    partx -d "${SEA}" 2>/dev/null || true
+    compgen -G "${SEA}p*" >/dev/null || break
+    sleep 0.5
+  done
+  compgen -G "${SEA}p*" >/dev/null && { bad "no se pudieron quitar las particiones de ${SEA}"; return 1; }
+  for _ in $(seq 1 20); do
+    partx -a "${SEA}" 2>/dev/null && [[ -b "${SEA}p3" ]] && return 0
+    command -v udevadm >/dev/null && udevadm settle 2>/dev/null || true
+    sleep 0.5
+  done
+  bad "partx -a ${SEA}"; return 1
+}
+reread
 expect_rw "${SEA}p1" "sin udev (limitación conocida)"
 for n in 1 2 3; do  # lo que haría la regla udev al recibir 'add'
   env -i DEVNAME="${SEA}p${n}" DEVTYPE=partition ID_SERIAL_SHORT=SEAVIRT42 \
