@@ -43,9 +43,41 @@ jobs:
           echo "::error title=Pruebas: líneas con fallos::$(grep -nE 'FAIL|ERROR|FALLÓ|Traceback|Error|error:|SC[0-9]{4}' pruebas.log | head -60 | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
           echo "::error title=Pruebas: final del registro::$(tail -80 pruebas.log | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
 
+  paquetes:
+    name: Verificar los paquetes en Debian 13
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Comprobar cada paquete de las listas (main, contrib, non-free, non-free-firmware)
+        run: |
+          set -o pipefail
+          sudo docker run --rm -v "$GITHUB_WORKSPACE":/src -w /src debian:trixie bash -euo pipefail -c '
+            sed -i "s/^Components: main$/Components: main contrib non-free non-free-firmware/" /etc/apt/sources.list.d/debian.sources
+            cat > /etc/apt/sources.list.d/backports.sources <<FIN
+          Types: deb
+          URIs: http://deb.debian.org/debian
+          Suites: trixie-backports
+          Components: main contrib non-free non-free-firmware
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          FIN
+            apt-get update -q >/dev/null
+            faltan=0
+            for p in $(grep -hvE "^\s*(#|$)" config/package-lists/*.list.chroot | sed "s/#.*//" | tr -s " \t" "\n" | sort -u); do
+              if [ -z "$(apt-cache policy "$p" | sed -n "s/^  Candidate: //p" | grep -v "(none)")" ]; then
+                echo "FALTA: $p · parecidos: $(apt-cache search --names-only "$p" | cut -d" " -f1 | head -5 | tr "\n" " ")"
+                faltan=$((faltan+1))
+              fi
+            done
+            echo "Paquetes que faltan: $faltan"
+            [ "$faltan" -eq 0 ]' 2>&1 | tee paquetes.log
+      - name: Mostrar los que faltan
+        if: failure()
+        run: echo "::error title=Paquetes que no existen en Debian 13::$(grep -E 'FALTA|faltan' paquetes.log | tr -d '\r' | sed -e 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+
   iso:
     name: Construir la ISO en Debian 13
-    needs: pruebas
+    needs: [pruebas, paquetes]
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
