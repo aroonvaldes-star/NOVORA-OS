@@ -34,7 +34,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Batería completa (incluye discos loop desechables)
-        run: sudo env "PATH=$PATH" bash tests/run-tests.sh
+        run: |
+          set -o pipefail
+          sudo env "PATH=$PATH" bash tests/run-tests.sh 2>&1 | tee pruebas.log
+      - name: Mostrar el error como anotación
+        if: failure()
+        run: |
+          echo "::error title=Pruebas: líneas con fallos::$(grep -nE 'FAIL|ERROR|FALLÓ|Traceback|Error|error:|SC[0-9]{4}' pruebas.log | head -60 | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+          echo "::error title=Pruebas: final del registro::$(tail -80 pruebas.log | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
 
   iso:
     name: Construir la ISO en Debian 13
@@ -62,6 +69,11 @@ jobs:
                 live-build debootstrap xorriso squashfs-tools ca-certificates git
               git config --global --add safe.directory /src
               bash scripts/build-iso.sh $ATLAS_FLAG'
+
+      - name: Mostrar el error como anotación
+        if: failure()
+        run: |
+          echo "::error title=ISO: final de build.log::$(tail -120 build/build.log 2>/dev/null | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
 
       - name: Resumen
         if: always()
