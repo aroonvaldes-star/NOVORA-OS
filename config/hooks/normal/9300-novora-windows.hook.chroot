@@ -56,13 +56,15 @@ else:
   fi
   case "$info" in
     SIN-ASSET*)
-      # Algunos proyectos (p. ej. llama.cpp) marcan como «latest» una publicación
-      # sin binarios; se busca la más reciente que sí tenga el archivo.
+      # Algunos proyectos marcan como «latest» una publicación sin binarios. Por
+      # ejemplo llama.cpp: «latest» es v0.7.0 (solo nightly-tag.txt) y publica
+      # cada compilación oficial bXXXX con prerelease: true (release-publish.yml).
+      # Se toma la más reciente que trae el archivo, saltando solo borradores.
       echo "NOVORA: $1: «latest» (${info#SIN-ASSET }) no trae '$2'; busco en las publicaciones recientes"
       info=$(wget -q -O- "https://api.github.com/repos/$1/releases?per_page=30" | python3 -c '
 import json, re, sys
 for d in json.load(sys.stdin):
-    if d.get("draft") or d.get("prerelease"):
+    if d.get("draft"):
         continue
     for a in d.get("assets", []):
         if re.search(sys.argv[1], a["name"]):
