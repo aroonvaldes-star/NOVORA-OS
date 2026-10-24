@@ -7,7 +7,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="${HERE}/../config/includes.chroot/usr/local/bin"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 F="${TMP}/fake"; mkdir -p "${F}"
-export HOME="${TMP}/home"; mkdir -p "${HOME}"; unset XDG_DATA_HOME
+export HOME="${TMP}/home"; mkdir -p "${HOME}"; unset XDG_DATA_HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_STATE_HOME
 pass=0 fail=0
 ok()  { echo "  PASÓ  $*"; pass=$((pass + 1)); }
 bad() { echo "  FALLÓ $*"; fail=$((fail + 1)); }
