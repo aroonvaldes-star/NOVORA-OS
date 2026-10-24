@@ -16,7 +16,7 @@
 | P0-7 | GRUB sin NVRAM (`--no-nvram --force-extra-removable`), efibootmgr de solo lectura, `efivarfs` en solo lectura, `installEFIFallback: false` | Hecho; probado con herramientas simuladas | T04: `OVMF_VARS.fd` con el mismo hash antes y después; la ESP del Seagate contiene `EFI/BOOT/BOOTX64.EFI` (shim) y arranca con Secure Boot activado |
 | P0-8 | Rechazar BIOS/Legacy (B13 + envoltorio) | Hecho | En VM con SeaBIOS, el auditor devuelve 3 y el envoltorio no ejecuta GRUB |
 | P0-9 | Bloquear el instalador en hardware físico | Hecho (`systemd-detect-virt`) | Fuera de una VM, `novora-install` sale con código 4 sin escribir nada |
-| P0-10 | Confirmar que ningún otro módulo de Calamares/Debian llama a `grub-install`/`efibootmgr` sin envoltorio | **PENDIENTE** | `build.log` sin líneas «NOVORA AVISO», o cada una analizada y resuelta |
+| P0-10 | Confirmar que ningún otro módulo de Calamares/Debian llama a `grub-install`/`efibootmgr` sin envoltorio | **Hecho (build.log 24/10)**: ningún aviso de grub-install/efibootmgr; los 4 «NOVORA AVISO» son de descargas (ver T01) | `build.log` sin líneas «NOVORA AVISO», o cada una analizada y resuelta |
 | P0-11 | Instalador sin particionado para el Seagate (`novora-installer`, v0.2) | **PENDIENTE (diseño)** | T08 PASÓ con «Borrar disco» imposible por diseño: la herramienta nunca abre el disco completo para escribir |
 | P0-12 | Salud del Seagate (solo lectura) | **PENDIENTE** | `smartctl` sin sectores pendientes ni reasignados en aumento; `dmesg` sin resets durante 30 minutos de lectura con `fio --readonly` |
 | P0-13 | T11: Windows arranca sin el disco Linux | **PENDIENTE** | VM con Windows 11 (OVMF + TPM virtual): arranque normal, sin pedir clave de BitLocker, con la ESP de Windows sin cambios (hash) |
@@ -25,9 +25,9 @@
 
 | ID | Corrección | Estado | Aceptación |
 |---|---|---|---|
-| P1-1 | Log, manifiesto, SHA256 relativo, `--clean`, comprobación de anfitrión y espacio | Hecho; probado con `lb` simulado | T01 real: `sha256sum -c` correcto; `.packages` no vacío |
+| P1-1 | Log, manifiesto, SHA256 relativo, `--clean`, comprobación de anfitrión y espacio | **Hecho (T01 real)**: `sha256sum -c` OK; `.packages` con 2726 paquetes | T01 real: `sha256sum -c` correcto; `.packages` no vacío |
 | P1-2 | `hostname`/`username` vía `--bootappend-live` | Hecho | En la Live, `hostname` devuelve `novora-os` |
-| P1-3 | Verificar en trixie: `--bootloaders "grub-efi,syslinux"`, `--iso-application`, paquetes `[VERIFICAR]` | **PENDIENTE** | `lb config` y `lb build` sin errores |
+| P1-3 | Verificar en trixie: `--bootloaders "grub-efi,syslinux"`, `--iso-application`, paquetes `[VERIFICAR]` | **Hecho** tras renombrar `spectacle` → `kde-spectacle` y quitar `scrcpy` (no existe en trixie) | `lb config` y `lb build` sin errores |
 | P1-4 | Konsole con `--hold` | Hecho | Captura del resultado del auditor visible |
 | P1-5 | Ejecutar Calamares desde `novora-install` en Wayland/X11 | **PENDIENTE** | Calamares abre como root y solo lista el disco autorizado |
 | P1-6 | Firmware Wi-Fi/audio; ruta gráfica (nouveau / NVIDIA) | Parcial (paquetes) | T09 con estado por componente |
@@ -41,7 +41,7 @@
 
 | ID | Escenario | Estado | Evidencia |
 |---|---|---|---|
-| T01 | Compilar en Debian 13 | PENDIENTE | Espejos de Debian bloqueados en el entorno de auditoría |
+| T01 | Compilar en Debian 13 | **PASÓ** (24/10/2026, contenedor Debian 13) | `novora-os-0.1.1-amd64.iso`, 4 026 531 840 bytes, SHA256 `43c90be07859a2c2d88605f992ee213cc0accedd48f0f09ac34af3f61bd5d4f2`. Avisos: `llama.cpp-tools` no existe en trixie ni en trixie-backports (ATLAS sin motor); DXVK, VKD3D-Proton y winetricks no se descargaron porque el proxy del entorno bloqueó `api.github.com` (repetir en un anfitrión normal) |
 | T02 | Live en VM UEFI | PENDIENTE | — |
 | T03 | Windows + Seagate simulados | PENDIENTE (kernel: PASÓ con loop, E-04) | `tests/test_guard_loop.sh` |
 | T04 | ESP interna + externa | PENDIENTE (envoltorio: PASÓ simulado, E-05) | `tests/test_wrappers_and_build.sh` |
