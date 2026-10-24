@@ -65,6 +65,7 @@ jobs:
           sudo docker run --rm --privileged \
             -v "$GITHUB_WORKSPACE":/src -w /src -e ATLAS_FLAG \
             debian:trixie bash -euo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
               apt-get update -q
               apt-get install -y -q --no-install-recommends \
                 live-build debootstrap xorriso squashfs-tools ca-certificates git
@@ -74,7 +75,9 @@ jobs:
       - name: Mostrar el error como anotación
         if: failure()
         run: |
-          echo "::error title=ISO: final de la salida::$(tail -150 construccion.log 2>/dev/null | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+          limpiar() { tr -d '\r' | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g'; }
+          echo "::error title=ISO: líneas con errores::$(grep -naiE '^E:|error|fail|denied|cannot|not found|no se pudo|falta|AVISO' construccion.log 2>/dev/null | tail -40 | limpiar)"
+          echo "::error title=ISO: final de la salida::$(tail -60 construccion.log 2>/dev/null | limpiar)"
           echo "::error title=ISO: espacio libre::$(df -h / | sed ':a;N;$!ba;s/\n/%0A/g')"
 
       - name: Resumen
