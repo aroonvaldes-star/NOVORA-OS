@@ -61,6 +61,7 @@ jobs:
         env:
           ATLAS_FLAG: ${{ inputs.atlas_requerido && '--atlas-required' || '' }}
         run: |
+          set -o pipefail
           sudo docker run --rm --privileged \
             -v "$GITHUB_WORKSPACE":/src -w /src -e ATLAS_FLAG \
             debian:trixie bash -euo pipefail -c '
@@ -68,12 +69,13 @@ jobs:
               apt-get install -y -q --no-install-recommends \
                 live-build debootstrap xorriso squashfs-tools ca-certificates git
               git config --global --add safe.directory /src
-              bash scripts/build-iso.sh $ATLAS_FLAG'
+              bash scripts/build-iso.sh $ATLAS_FLAG' 2>&1 | tee construccion.log
 
       - name: Mostrar el error como anotación
         if: failure()
         run: |
-          echo "::error title=ISO: final de build.log::$(tail -120 build/build.log 2>/dev/null | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+          echo "::error title=ISO: final de la salida::$(tail -150 construccion.log 2>/dev/null | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+          echo "::error title=ISO: espacio libre::$(df -h / | sed ':a;N;$!ba;s/\n/%0A/g')"
 
       - name: Resumen
         if: always()
@@ -99,6 +101,7 @@ jobs:
         with:
           name: novora-os-construccion
           path: |
+            construccion.log
             build/build.log
             build/*.sha256
             build/*.packages
