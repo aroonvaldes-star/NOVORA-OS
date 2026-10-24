@@ -9,3 +9,4 @@ build.log
 *.gguf
 __pycache__/
 *.pyc
+/iso-build/
