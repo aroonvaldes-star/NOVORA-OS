@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Auditoría SOLO LECTURA de discos antes de instalar NOVORA OS."""
+import json
+import os
+import subprocess
+import sys
+
+FIELDS = 'NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,FSTYPE,MOUNTPOINT,PTTYPE'
+
+
+def human(num):
+    try:
+        n = float(num)
+        for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
+            if n < 1024 or unit == 'TiB':
+                return f'{n:.1f} {unit}'
+            n /= 1024
+    except (ValueError, TypeError):
+        return '?'
+
+
+def getdisks():
+    p = subprocess.run(['lsblk', '--json', '--bytes', '--output', FIELDS],
+                       text=True, capture_output=True, check=True)
+    return [x for x in json.loads(p.stdout)['blockdevices']
+            if x.get('type') == 'disk']
+
+
+def show():
+    print('=== NOVORA OS 0.1 | Auditoría de almacenamiento (SOLO LECTURA) ===')
+    print('Este programa NUNCA formatea, particiona ni escribe en el disco.\n')
+    print('Arranque actual:', 'UEFI' if os.path.isdir('/sys/firmware/efi') else 'BIOS/Legacy (o entorno sin UEFI)')
+    disks = getdisks()
+    choices = []
+    for d in disks:
+        print(f"\nDISCO {d.get('path')}: {d.get('model') or 'sin modelo'} | "
+              f"{human(d.get('size'))} | serie={d.get('serial') or '?'} | "
+              f"bus={d.get('tran') or '?'} | tabla={d.get('pttype') or '?'}")
+        for p in d.get('children', []):
+            if p.get('type') != 'part':
+                continue
+            choices.append((d, p))
+            fs = p.get('fstype') or 'SIN FORMATO'
+            print(f"  [{len(choices)}] {p.get('path')} | {human(p.get('size'))} | "
+                  f"{fs} | montada={p.get('mountpoint') or 'no'}")
+    return disks, choices
+
+
+def main():
+    try:
+        disks, choices = show()
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError) as ex:
+        print('No se pudo consultar lsblk:', ex, file=sys.stderr)
+        return 2
+    if not choices:
+        print('\nNo se encontraron particiones seleccionables. No instalar.')
+        return 1
+    if '--interactive' not in sys.argv:
+        print('\nPara seleccionar y revisar una partición SIN modificarla: novora-storage-audit --interactive')
+        return 0
+    try:
+        selected = int(input('\nNúmero de partición candidata (0 cancela): ').strip())
+    except (ValueError, EOFError):
+        print('Cancelado.')
+        return 1
+    if selected == 0:
+        print('Cancelado.')
+        return 0
+    if selected < 1 or selected > len(choices):
+        print('Selección inexistente.')
+        return 1
+    disk, part = choices[selected - 1]
+    print('\nCANDIDATA:', part.get('path'))
+    print('DISCO PADRE:', disk.get('path'))
+    print('MODELO:', disk.get('model') or '(no informado)')
+    print('SERIE:', disk.get('serial') or '(no informada)')
+    print('CONEXIÓN:', disk.get('tran') or '(desconocida)')
+    print('FS:', part.get('fstype') or '(sin formato)')
+    print('TAMAÑO:', human(part.get('size')))
+    print('TABLA DE PARTICIONES:', disk.get('pttype') or '(desconocida)')
+    if disk.get('tran') != 'usb':
+        print('\nALERTA: No está identificado como disco USB externo. No instalar.')
+        return 3
+    if part.get('mountpoint'):
+        print('\nALERTA: La partición está montada. No instalar.')
+        return 3
+    if part.get('fstype') in ('ntfs', 'exfat', 'vfat', 'fat', 'fat32', 'BitLocker'):
+        print('\nALERTA: Posibles datos/Windows o EFI. No formatear sin respaldo y verificación.')
+        return 3
+    if not (os.path.isdir('/sys/firmware/efi')):
+        print('\nATENCIÓN: Arranque BIOS; comprueba el modo de Windows antes de instalar.')
+    if disk.get('pttype') == 'dos':
+        print('\nATENCIÓN: Disco MBR. En UEFI/GPT suelen existir menos problemas de arranque;')
+        print('NO conviertas a GPT sin copia de seguridad y planificación.')
+    efi = [p for p in disk.get('children', [])
+           if p.get('type') == 'part' and p.get('fstype') in ('vfat', 'fat32')]
+    if not efi and os.path.isdir('/sys/firmware/efi'):
+        print('\nATENCIÓN: No se ve una partición FAT para EFI en este disco.')
+        print('Debes comprobar/crear una ESP EN SEAGATE antes de instalar; no usar la de Windows.')
+    print('\nInspección terminada. No se ha escrito ni modificado nada.')
+    print('En Calamares usa PARTICIONADO MANUAL y revisa que / y /boot/efi estén en Seagate.')
+    print('Nunca selecciones Borrar disco, ni marques Formatear en las particiones de Windows.')
+    print('Detente si el resumen propone escribir en el disco interno o en su partición EFI.')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
