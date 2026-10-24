@@ -42,7 +42,7 @@
 | ID | Escenario | Estado | Evidencia |
 |---|---|---|---|
 | T01 | Compilar en Debian 13 | **PASÓ** (24/10/2026, contenedor Debian 13) | `novora-os-0.1.1-amd64.iso`, 4 026 531 840 bytes, SHA256 `43c90be07859a2c2d88605f992ee213cc0accedd48f0f09ac34af3f61bd5d4f2`. Avisos: `llama.cpp-tools` no existe en trixie ni en trixie-backports (ATLAS sin motor); DXVK, VKD3D-Proton y winetricks no se descargaron porque el proxy del entorno bloqueó `api.github.com` (repetir en un anfitrión normal) |
-| T02 | Live en VM UEFI | PENDIENTE | — |
+| T02 | Live en VM UEFI | **PARCIAL** (24/10/2026, QEMU q35 + OVMF, sin KVM) | Menú GRUB sin entradas «Install» (P0-1 OK); llega a Plasma con el fondo NOVORA (`docs/evidencia/T02-plasma-uefi.png`). Falta: comprobar `novora-disk-guard status` y `hostname` dentro de la Live. Hallazgos: el menú GRUB no tiene tiempo de espera y sigue con la marca Debian; la sesión Live acaba en la pantalla de bloqueo |
 | T03 | Windows + Seagate simulados | PENDIENTE (kernel: PASÓ con loop, E-04) | `tests/test_guard_loop.sh` |
 | T04 | ESP interna + externa | PENDIENTE (envoltorio: PASÓ simulado, E-05) | `tests/test_wrappers_and_build.sh` |
 | T05 | Intercambio de `sdX` | PENDIENTE (lógica: PASÓ, E-06) | `test_T05_resolves_by_identity_after_sdX_swap` |
