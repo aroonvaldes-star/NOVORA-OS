@@ -58,7 +58,21 @@ else:
     print("SIN-ASSET", d.get("tag_name", "?"), " ".join(names[:40]))' "$2") || info=""
   fi
   case "$info" in
-    SIN-ASSET*) echo "NOVORA AVISO: $1: ningún archivo coincide con '$2' en ${info#SIN-ASSET }"; return 1 ;;
+    SIN-ASSET*)
+      # Algunos proyectos (p. ej. llama.cpp) marcan como «latest» una publicación
+      # sin binarios; se busca la más reciente que sí tenga el archivo.
+      echo "NOVORA: $1: «latest» (${info#SIN-ASSET }) no trae '$2'; busco en las publicaciones recientes"
+      info=$(wget -q -O- "https://api.github.com/repos/$1/releases?per_page=30" | python3 -c '
+import json, re, sys
+for d in json.load(sys.stdin):
+    if d.get("draft") or d.get("prerelease"):
+        continue
+    for a in d.get("assets", []):
+        if re.search(sys.argv[1], a["name"]):
+            dig = (a.get("digest") or "").removeprefix("sha256:") or "-"
+            print(d["tag_name"], dig, a["browser_download_url"]); sys.exit()' "$2") || info=""
+      [ -n "$info" ] || { echo "NOVORA AVISO: $1: ninguna publicación reciente trae '$2'"; return 1; }
+      ;;
   esac
   if [ -z "$info" ]; then
     if [ -z "${4:-}" ]; then echo "NOVORA AVISO: $1: la API de GitHub no respondió (¿límite de consultas?)"; return 1; fi
