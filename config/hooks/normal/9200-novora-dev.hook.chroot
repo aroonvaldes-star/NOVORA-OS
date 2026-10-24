@@ -11,6 +11,22 @@ REQUIRED=optional
 [ -f /etc/novora-atlas/build.conf ] && . /etc/novora-atlas/build.conf
 REQUIRED="${NOVORA_DEV_DOTNET:-$REQUIRED}"
 
+# scrcpy (espejo y control del teléfono para LINK CONTROL): en Debian 13 solo
+# está en trixie-backports (contrib). Solo ese paquete sale de backports; el
+# resto del sistema sigue en trixie estable.
+cat >/etc/apt/sources.list.d/novora-backports.sources <<'SRC'
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: trixie-backports
+Components: main contrib
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+SRC
+if apt-get update && apt-get install -y --no-install-recommends -t trixie-backports scrcpy; then
+  echo "NOVORA: scrcpy instalado desde trixie-backports"
+else
+  echo "NOVORA AVISO: no se pudo instalar scrcpy; 'novora-dev espejo' no funcionará."
+fi
+
 # Privacidad: sin telemetría del SDK de .NET para todos los usuarios.
 cat >/etc/profile.d/novora-dotnet.sh <<'ENV'
 export DOTNET_CLI_TELEMETRY_OPTOUT=1
