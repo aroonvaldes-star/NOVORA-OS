@@ -76,7 +76,10 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _json(self):
-        n = int(self.headers.get("Content-Length") or 0)
+        raw = (self.headers.get("Content-Length") or "0").strip()
+        if not raw.isascii() or not raw.isdigit():
+            raise ValueError("Content-Length no válido")
+        n = int(raw)
         if n > MAX_BODY:
             raise ValueError("cuerpo demasiado grande")
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":

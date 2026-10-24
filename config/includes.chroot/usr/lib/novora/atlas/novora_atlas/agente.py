@@ -3,7 +3,8 @@
 Seguridad (mismas reglas que el resto de ATLAS, fail-closed):
   * Las órdenes pasan SIEMPRE por policy.classify. PROHIBIDO → nunca.
   * Solo se ejecutan solas las órdenes de SOLO LECTURA que no tocan archivos
-    ocultos (.ssh, .gnupg, .config…) ni recorren carpetas enteras.
+    ocultos (.ssh, .gnupg, .config…) ni recorren carpetas enteras. git
+    nunca se ejecuta solo (el repositorio puede definir programas).
     Todo lo demás queda como propuesta que TÚ confirmas al final.
   * Escribir archivos también es una propuesta: nunca se escribe sin tu
     confirmación, solo dentro de tu carpeta personal y nunca en archivos ocultos
@@ -69,6 +70,11 @@ def auto_runnable(verdict, home=None):
         return False, verdict.reason
     argv = verdict.argv
     prog = os.path.basename(argv[0])
+    if prog == "git":
+        # La configuración del propio repositorio (.git/config, .gitattributes)
+        # puede ejecutar programas incluso en «git status» (core.fsmonitor,
+        # filtros clean, textconv): un repositorio descargado no es de fiar.
+        return False, "git puede ejecutar programas definidos por el repositorio"
     if prog in ("rg", "tree") or (prog in ("grep", "diff", "ls")
                                   and any(RECURSIVE_FLAGS.match(a) for a in argv[1:])):
         return False, "recorre carpetas enteras (podría leer archivos ocultos)"

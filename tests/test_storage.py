@@ -183,5 +183,76 @@ class GuardSysfs(unittest.TestCase):
                                              "/dev/sda", "/dev/sda1"])
 
 
+def load_guard():
+    import importlib.machinery
+    import importlib.util
+    os.environ["NOVORA_LIB"] = LIB
+    path = os.path.join(ROOT, "config/includes.chroot/usr/local/sbin/novora-disk-guard")
+    loader = importlib.machinery.SourceFileLoader("novora_disk_guard", path)
+    spec = importlib.util.spec_from_loader("novora_disk_guard", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class GuardStacked(unittest.TestCase):
+    """R-05: capas dm/LVM/MD activas antes del bloqueo → fail-closed."""
+    def setUp(self):
+        self.sys = tempfile.mkdtemp()
+        for n in ("sdb", "sdb1", "sdb2", "sdb3", "nvme0n1", "nvme0n1p1", "nvme0n1p2",
+                  "nvme0n1p3", "dm-0", "dm-1"):
+            os.makedirs(os.path.join(self.sys, n, "holders"))
+        os.environ["NOVORA_SYSFS_BLOCK"] = self.sys
+        os.environ["NOVORA_TEST_NO_SYSFS"] = "1"
+        os.environ["NOVORA_STATE_DIR"] = tempfile.mkdtemp()
+        self.mounts = os.path.join(self.sys, "mounts")
+        with open(self.mounts, "w") as fh:
+            fh.write("proc /proc proc rw 0 0\n")
+        os.environ["NOVORA_MOUNTS"] = self.mounts
+        self.g = load_guard()
+        self.calls = []
+        self.g.set_ro = lambda node, ro: self.calls.append((node, ro))
+        self.g.efivars_ro = lambda: True
+
+    def tearDown(self):
+        for k in ("NOVORA_SYSFS_BLOCK", "NOVORA_MOUNTS", "NOVORA_TEST_NO_SYSFS"):
+            os.environ.pop(k, None)
+
+    def hold(self, lower, upper):
+        os.mkdir(os.path.join(self.sys, lower, "holders", upper))
+
+    def test_holders_are_followed_recursively(self):
+        self.hold("nvme0n1p3", "dm-0")        # LUKS abierto
+        self.hold("dm-0", "dm-1")             # LVM encima
+        self.assertEqual(self.g.holders("/dev/nvme0n1p3"), ["/dev/dm-0", "/dev/dm-1"])
+        self.assertEqual(self.g.holders("/dev/sdb1"), [])
+
+    def test_lockdown_fails_closed_with_active_layers(self):
+        self.assertEqual(self.g.cmd_lockdown(tree("base")), 0)
+        self.hold("nvme0n1p3", "dm-0")
+        self.calls.clear()
+        self.assertEqual(self.g.cmd_lockdown(tree("base")), 4)
+        self.assertIn(("/dev/dm-0", True), self.calls)     # la capa también queda RO
+
+    def test_rw_mount_through_mapper_detected(self):
+        with open(self.mounts, "a") as fh:
+            fh.write("/dev/mapper/vg-datos /mnt ext4 rw,relatime 0 0\n")
+        disk = next(d for d in ns.disks(tree("base")) if d["path"] == "/dev/nvme0n1")
+        self.assertEqual(self.g.rw_mounts(disk), [])
+        self.assertEqual(self.g.rw_mounts(disk, ["/dev/mapper/vg-datos"]),
+                         [("/dev/mapper/vg-datos", "/mnt")])
+
+    def test_unlock_and_verify_refuse_layers_on_protected_disks(self):
+        f, allow = ns.evaluate(tree("base"), "/dev/sdb3", "/dev/sdb2", True)
+        self.hold("nvme0n1p3", "dm-0")
+        os.environ["NOVORA_LSBLK_JSON"] = os.path.join(FX, "base.json")
+        try:
+            self.assertEqual(self.g.cmd_unlock(tree("base"), allow, True), 4)
+            self.assertFalse(any(ro is False for _, ro in self.calls), self.calls)
+            self.assertEqual(self.g.cmd_verify(tree("base"), allow), 5)
+        finally:
+            del os.environ["NOVORA_LSBLK_JSON"]
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
