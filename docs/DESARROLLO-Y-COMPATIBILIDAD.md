@@ -41,7 +41,7 @@ Todo funciona **dentro de NOVORA OS**, sin máquinas virtuales ni Windows aparte
 | Mejora | Detalle |
 |---|---|
 | **Wine 11** (WineHQ oficial) | Nuevo WoW64, NTSync, mejor soporte de Wayland. Respaldo automático: Wine 10 de Debian. En trixie, `winehq-stable` 11.0 aún exige i386 (bug WineHQ 59343), por eso se habilita multiarch |
-| **DXVK + VKD3D-Proton incluidos** | DirectX 9/10/11 y **12** → Vulkan, **sin internet**: `novora-win optimizar APP` |
+| **DXVK + VKD3D-Proton incluidos** | DirectX 9/10/11 y **12** → Vulkan, **sin internet**: `novora-win optimizar APP`. Si GitHub Releases no responde al construir la ISO, se compilan desde su código fuente (git, último tag) con MinGW; winetricks sale del tag por git o del paquete de Debian |
 | **GameMode** | Perfil de rendimiento de CPU/GPU mientras la app corre |
 | **GPU dedicada automática** | En laptops híbridas, `optimizar` activa la NVIDIA en el perfil de la app |
 | **Perfiles por app** | `novora-win perfil APP GPU=nvidia GAMEMODE=1 WAYLAND=1 DLL_OVERRIDES=... DXVK_HUD=fps` (claves y valores validados; un perfil editado a mano no puede inyectar órdenes) |
