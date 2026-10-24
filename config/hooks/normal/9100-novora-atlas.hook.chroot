@@ -40,23 +40,43 @@ for pkg in libggml0-backend-vulkan libggml-backend-vulkan; do
 done
 # Descarga la última versión publicada de un proyecto de GitHub (asset por patrón)
 # y la verifica contra la huella SHA256 que publica GitHub ("digest") si existe.
-fetch_release() {  # $1 repo, $2 regex del asset, $3 destino
-  info=$(wget -q -O- "https://api.github.com/repos/$1/releases/latest" | python3 -c '
+# Si la API no responde (límite de 60 consultas/hora por IP sin autenticar), usa
+# la redirección pública /releases/latest y el nombre esperado del asset ($4).
+fetch_release() {  # $1 repo, $2 regex del asset, $3 destino, $4 plantilla opcional ({tag})
+  api=$(wget -q -O- "https://api.github.com/repos/$1/releases/latest") || api=""
+  info=""
+  if [ -n "$api" ]; then
+    info=$(printf '%s' "$api" | python3 -c '
 import json, re, sys
 d = json.load(sys.stdin)
+names = [a["name"] for a in d.get("assets", [])]
 for a in d.get("assets", []):
     if re.search(sys.argv[1], a["name"]):
         dig = (a.get("digest") or "").removeprefix("sha256:") or "-"
-        print(d["tag_name"], dig, a["browser_download_url"]); break' "$2") || return 1
-  [ -n "$info" ] || return 1
+        print(d["tag_name"], dig, a["browser_download_url"]); break
+else:
+    print("SIN-ASSET", d.get("tag_name", "?"), " ".join(names[:40]))' "$2") || info=""
+  fi
+  case "$info" in
+    SIN-ASSET*) echo "NOVORA AVISO: $1: ningún archivo coincide con '$2' en ${info#SIN-ASSET }"; return 1 ;;
+  esac
+  if [ -z "$info" ]; then
+    if [ -z "${4:-}" ]; then echo "NOVORA AVISO: $1: la API de GitHub no respondió (¿límite de consultas?)"; return 1; fi
+    loc=$(wget -S --max-redirect=0 -O /dev/null "https://github.com/$1/releases/latest" 2>&1 | sed -n 's/^ *Location: //p' | tail -1)
+    tag=${loc##*/}
+    [ -n "$tag" ] || { echo "NOVORA AVISO: $1: no se pudo averiguar la última versión"; return 1; }
+    name=$(printf '%s' "$4" | sed "s/{tag}/$tag/g")
+    info="$tag - https://github.com/$1/releases/download/$tag/$name"
+    echo "NOVORA: $1: API no disponible; uso la redirección pública ($tag)"
+  fi
   tag=${info%% *}; rest=${info#* }; want=${rest%% *}; link=${rest#* }
-  wget -q -O "$3" "$link" || return 1
+  wget -q -O "$3" "$link" || { echo "NOVORA AVISO: $1 $tag: falló la descarga de $link"; return 1; }
   got=$(sha256sum "$3" | cut -d' ' -f1)
   if [ "$want" != "-" ] && [ "$want" != "$got" ]; then
     echo "NOVORA AVISO: $1 $tag: la huella SHA256 no coincide con la de GitHub; descartado."
     rm -f "$3"; return 1
   fi
-  echo "NOVORA: $1 $tag sha256=$got (verificada: $( [ "$want" = "-" ] && echo no-publicada || echo si))"
+  echo "NOVORA: $1 $tag sha256=$got (huella: $( [ "$want" = "-" ] && echo "NO verificada, GitHub no la dio" || echo "verificada con GitHub"))"
 }
 # Respaldo: binario oficial de llama.cpp (ggml-org) con backend Vulkan, que usa
 # la GPU con Mesa (Intel, AMD, NVK) o con el driver de NVIDIA, y si no hay GPU
@@ -64,7 +84,7 @@ for a in d.get("assets", []):
 if [ "$installed" -ne 1 ]; then
   echo "ATLAS: llama.cpp-tools no está en Debian; probando el binario oficial de ggml-org/llama.cpp"
   tmp=$(mktemp -d)
-  if fetch_release ggml-org/llama.cpp 'bin-ubuntu-vulkan-x64\.(zip|tar\.gz)$' "$tmp/llama.pkg"; then
+  if fetch_release ggml-org/llama.cpp 'bin-ubuntu-vulkan-x64\.(zip|tar\.gz)$' "$tmp/llama.pkg" 'llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz'; then
     apt-get install -y --no-install-recommends libvulkan1 libgomp1 || true
     LLAMA=/usr/lib/novora/llama
     rm -rf "$LLAMA"; mkdir -p "$LLAMA"
