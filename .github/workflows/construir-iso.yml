@@ -53,24 +53,28 @@ jobs:
         run: |
           set -o pipefail
           sudo docker run --rm -v "$GITHUB_WORKSPACE":/src -w /src debian:trixie bash -euo pipefail -c '
-            sed -i "s/^Components: main$/Components: main contrib non-free non-free-firmware/" /etc/apt/sources.list.d/debian.sources
-            cat > /etc/apt/sources.list.d/backports.sources <<FIN
-          Types: deb
-          URIs: http://deb.debian.org/debian
-          Suites: trixie-backports
-          Components: main contrib non-free non-free-firmware
-          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-          FIN
+            # Mismas secciones que build-iso.sh (lb config --archive-areas).
+            AREAS=$(sed -n "s/.*--archive-areas \"\([^\"]*\)\".*/\1/p" scripts/build-iso.sh)
+            echo "Secciones de la construcción: $AREAS"
+            sed -i "s/^Components: main$/Components: $AREAS/" /etc/apt/sources.list.d/debian.sources
             apt-get update -q >/dev/null
-            faltan=0
-            for p in $(grep -hvE "^\s*(#|$)" config/package-lists/*.list.chroot | sed "s/#.*//" | tr -s " \t" "\n" | sort -u); do
-              if [ -z "$(apt-cache policy "$p" | sed -n "s/^  Candidate: //p" | grep -v "(none)")" ]; then
-                echo "FALTA: $p · parecidos: $(apt-cache search --names-only "$p" | cut -d" " -f1 | head -5 | tr "\n" " ")"
-                faltan=$((faltan+1))
-              fi
+            lista=$(grep -hvE "^\s*(#|$)" config/package-lists/*.list.chroot | sed "s/#.*//" | tr -s " \t" "\n" | sort -u)
+            faltan=""
+            for p in $lista; do
+              [ -n "$(apt-cache policy "$p" | sed -n "s/^  Candidate: //p" | grep -v "(none)")" ] || faltan="$faltan $p"
             done
-            echo "Paquetes que faltan: $faltan"
-            [ "$faltan" -eq 0 ]' 2>&1 | tee paquetes.log
+            # Dónde están los que faltan: todas las secciones + backports.
+            sed -i "s/^Components: .*/Components: main contrib non-free non-free-firmware/" /etc/apt/sources.list.d/debian.sources
+            sed -i "s/^Suites: trixie trixie-updates$/Suites: trixie trixie-updates trixie-backports/" /etc/apt/sources.list.d/debian.sources
+            apt-get update -q >/dev/null
+            n=0
+            for p in $faltan; do
+              n=$((n+1))
+              donde=$(apt-cache madison "$p" | awk -F"|" "{gsub(/ /,\"\",\$3); print \$3}" | sort -u | tr "\n" " ")
+              echo "FALTA: $p · disponible en: ${donde:-ninguna} · parecidos: $(apt-cache search --names-only "^$p" | cut -d" " -f1 | head -4 | tr "\n" " ")"
+            done
+            echo "Paquetes que faltan: $n"
+            [ "$n" -eq 0 ]' 2>&1 | tee paquetes.log
       - name: Mostrar los que faltan
         if: failure()
         run: echo "::error title=Paquetes que no existen en Debian 13::$(grep -E 'FALTA|faltan' paquetes.log | tr -d '\r' | sed -e 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
