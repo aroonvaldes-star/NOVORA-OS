@@ -18,7 +18,7 @@ konsole
 dolphin
 kate
 ark
-spectacle
+kde-spectacle
 plasma-discover
 plasma-discover-backend-flatpak
 flatpak
@@ -84,7 +84,7 @@ libnotify-bin
 # Android: adb/fastboot, espejo y control del teléfono, reglas USB, JDK [VERIFICAR]
 adb
 fastboot
-scrcpy
+# scrcpy: no existe en Debian 13 (solo forky/sid); novora-dev espejo avisa si falta
 android-sdk-platform-tools-common
 openjdk-21-jdk-headless
 # Multimedia y compilación nativa
