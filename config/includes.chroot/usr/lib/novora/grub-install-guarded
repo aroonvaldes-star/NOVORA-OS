@@ -1,0 +1,51 @@
+#!/bin/sh
+# NOVORA OS — envoltorio de grub-install para Calamares (se ejecuta dentro del
+# chroot del sistema destino). Fail-closed:
+#   * solo UEFI x86_64 (un GRUB BIOS escribiría en el MBR de un disco);
+#   * la ESP y la raíz deben estar en el MISMO disco físico y ser escribibles;
+#   * añade --no-nvram (no crea/reordena entradas del firmware: protege el
+#     orden de arranque de Windows y evita disparar la recuperación BitLocker);
+#   * añade --force-extra-removable (opción de Debian) para dejar también
+#     EFI/BOOT/BOOTX64.EFI y poder arrancar el disco externo desde el menú
+#     de arranque del firmware sin entrada NVRAM.
+set -eu
+REAL="${NOVORA_REAL_GRUB_INSTALL:-/usr/sbin/grub-install}"
+FINDMNT="${NOVORA_FINDMNT:-findmnt}"
+LSBLK="${NOVORA_LSBLK:-lsblk}"
+SYSBLOCK="${NOVORA_SYSBLOCK:-/sys/class/block}"
+die() { echo "NOVORA grub-install-guarded: CANCELADO: $*" >&2; exit 1; }
+
+target=''; efidir=''; prev=''
+for a in "$@"; do
+  case "$prev" in
+    --target) target="$a" ;;
+    --efi-directory) efidir="$a" ;;
+  esac
+  case "$a" in
+    --target=*) target="${a#--target=}" ;;
+    --efi-directory=*) efidir="${a#--efi-directory=}" ;;
+    /dev/*) die "no se permite instalar en un dispositivo de bloque ($a)" ;;
+  esac
+  prev="$a"
+done
+[ "$target" = "x86_64-efi" ] || die "destino '$target' no permitido (solo x86_64-efi)"
+[ -n "$efidir" ] || die "falta --efi-directory"
+
+esp_src=$("$FINDMNT" -no SOURCE --mountpoint "$efidir") || die "la ESP no está montada en $efidir"
+root_src=$("$FINDMNT" -no SOURCE --mountpoint /) || die "no se pudo determinar la raíz"
+esp_fs=$("$LSBLK" -dno FSTYPE "$esp_src")
+esp_disk=$("$LSBLK" -dno PKNAME "$esp_src")
+root_disk=$("$LSBLK" -dno PKNAME "$root_src")
+[ "$esp_fs" = "vfat" ] || die "la ESP ($esp_src) no es vfat"
+if [ -z "$esp_disk" ] || [ "$esp_disk" != "$root_disk" ]; then
+  die "ESP ($esp_src, disco ${esp_disk:-?}) y raíz ($root_src, disco ${root_disk:-?}) en discos distintos"
+fi
+for dev in "$esp_src" "$root_src"; do
+  ro=$(cat "$SYSBLOCK/$(basename "$dev")/ro" 2>/dev/null || echo '?')
+  [ "$ro" = "0" ] || die "$dev no es escribible (ro=$ro): no es el destino autorizado"
+done
+
+case " $* " in *" --no-nvram "*) extra='' ;; *) extra='--no-nvram' ;; esac
+case " $* " in *" --force-extra-removable "*) ;; *) extra="$extra --force-extra-removable" ;; esac
+# shellcheck disable=SC2086  # $extra contiene opciones separadas a propósito
+exec "$REAL" "$@" $extra

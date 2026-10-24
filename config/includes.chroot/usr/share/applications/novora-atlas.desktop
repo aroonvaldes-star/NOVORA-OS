@@ -1,0 +1,24 @@
+[Desktop Entry]
+Type=Application
+Name=ATLAS
+GenericName=Asistente local
+Comment=Asistente sin internet: programar, organizar y entender la pantalla
+Exec=novora-atlas abrir
+Icon=help-about
+Terminal=false
+Categories=Utility;Development;
+Keywords=atlas;novora;asistente;ia;ayuda;programar;notas;tareas;
+X-KDE-Shortcuts=Meta+Shift+A
+Actions=pantalla;zona;chat;
+
+[Desktop Action pantalla]
+Name=Analizar la pantalla ahora
+Exec=novora-atlas pantalla --panel
+
+[Desktop Action zona]
+Name=Analizar una zona de la pantalla
+Exec=novora-atlas pantalla --panel --zona
+
+[Desktop Action chat]
+Name=Chat en terminal
+Exec=konsole -e novora-atlas chat

@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# NOVORA OS — herramientas de desarrollo para NOVORA-LINK (.NET/WPF) y
+# LINK CONTROL (Android).
+#
+#   novora-dev estado                          qué está instalado y si hay teléfono conectado
+#   novora-dev compilar [RUTA]                 dotnet build (incluye proyectos WPF) en Linux
+#   novora-dev probar [RUTA]                   dotnet test
+#   novora-dev publicar-windows RUTA.csproj    .exe de Windows autocontenido (win-x64)
+#   novora-dev ejecutar-windows RUTA.csproj    publica y lo abre con Wine (prefijo novora-link)
+#   novora-dev telefono                        dispositivos Android conectados (adb)
+#   novora-dev espejo [opciones scrcpy]        ver y controlar el teléfono en el escritorio
+#   novora-dev instalar rider|android-studio|toolbox ARCHIVO.tar.gz [--sha256 HASH]
+#
+# RUTA puede ser un .sln, un .csproj o una carpeta (por defecto, la actual).
+set -Eeuo pipefail
+DOTNET="${NOVORA_DOTNET:-dotnet}"
+OUT_BASE="${NOVORA_DEV_OUT:-$HOME/NOVORA-builds}"
+OPT="${NOVORA_DEV_OPT:-$HOME/.local/opt}"
+APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+
+die() { echo "novora-dev: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+need_dotnet() { have "${DOTNET}" || die ".NET SDK no instalado (ver: novora-dev estado)."; }
+
+target() {  # resuelve RUTA a algo que dotnet entienda
+  local p="${1:-.}"
+  [[ -e "${p}" ]] || die "no existe: ${p}"
+  realpath -- "${p}"
+}
+
+cmd="${1:-estado}"; shift || true
+case "${cmd}" in
+  estado)
+    echo "== .NET =="
+    if have "${DOTNET}"; then "${DOTNET}" --list-sdks 2>/dev/null || true; else echo "no instalado"; fi
+    echo "== Android =="
+    for t in adb fastboot scrcpy java; do
+      if have "${t}"; then echo "${t}: sí"; else echo "${t}: no"; fi
+    done
+    if have adb; then adb devices 2>/dev/null | sed -n '2,$p' | sed '/^$/d' || true; fi
+    echo "== IDE =="
+    for n in rider android-studio toolbox; do
+      if [[ -d "${OPT}/${n}" ]]; then echo "${n}: ${OPT}/${n}"; else echo "${n}: no instalado (novora-dev instalar ${n} ARCHIVO.tar.gz)"; fi
+    done
+    echo "== Windows (Wine) =="
+    if have novora-win; then novora-win estado; else echo "novora-win no disponible"; fi
+    ;;
+  compilar|probar)
+    need_dotnet
+    t="$(target "${1:-.}")"; shift || true
+    verb="build"; [[ "${cmd}" == probar ]] && verb="test"
+    # EnableWindowsTargeting permite COMPILAR proyectos net*-windows (WPF) en Linux.
+    exec "${DOTNET}" "${verb}" "${t}" -p:EnableWindowsTargeting=true "$@"
+    ;;
+  publicar-windows|ejecutar-windows)
+    need_dotnet
+    [[ $# -ge 1 ]] || die "uso: novora-dev ${cmd} RUTA.csproj"
+    proj="$(target "$1")"; shift
+    [[ "${proj}" == *.csproj ]] || die "indica el .csproj de la aplicación (no el .sln)"
+    name="$(basename -- "${proj}" .csproj)"
+    out="${OUT_BASE}/${name}-win-x64"
+    mkdir -p "${out}"
+    "${DOTNET}" publish "${proj}" -c Release -r win-x64 --self-contained true \
+      -p:EnableWindowsTargeting=true -o "${out}" "$@"
+    exe="${out}/${name}.exe"
+    [[ -f "${exe}" ]] || exe="$(find "${out}" -maxdepth 1 -name '*.exe' -print -quit)"
+    [[ -n "${exe}" && -f "${exe}" ]] || die "la publicación no produjo ningún .exe en ${out}"
+    echo "Ejecutable de Windows: ${exe}"
+    if [[ "${cmd}" == ejecutar-windows ]]; then
+      have novora-win || die "novora-win no disponible"
+      NOVORA_WIN_PREFIX="${NOVORA_WIN_PREFIX:-novora-link}" exec novora-win ejecutar "${exe}"
+    fi
+    ;;
+  telefono)
+    have adb || die "adb no instalado"
+    exec adb devices -l
+    ;;
+  espejo)
+    have scrcpy || die "scrcpy no instalado"
+    exec scrcpy "$@"
+    ;;
+  instalar)
+    [[ $# -ge 2 ]] || die "uso: novora-dev instalar rider|android-studio|toolbox ARCHIVO.tar.gz [--sha256 HASH]"
+    what="$1"; arch="$(realpath -- "$2")"; shift 2
+    want=""
+    if [[ "${1:-}" == "--sha256" ]]; then want="${2:-}"; [[ -n "${want}" ]] || die "falta el hash"; fi
+    case "${what}" in
+      rider)          launcher="bin/rider.sh";            label="JetBrains Rider";   icon="bin/rider.svg" ;;
+      android-studio) launcher="bin/studio.sh";           label="Android Studio";    icon="bin/studio.svg" ;;
+      toolbox)        launcher="bin/jetbrains-toolbox";   label="JetBrains Toolbox"; icon="" ;;
+      *) die "solo: rider, android-studio o toolbox" ;;
+    esac
+    [[ -f "${arch}" ]] || die "no existe: ${arch}"
+    if [[ -n "${want}" ]]; then
+      got="$(sha256sum -- "${arch}" | cut -d' ' -f1)"
+      [[ "${got,,}" == "${want,,}" ]] || die "SHA256 no coincide (esperado ${want}, obtenido ${got})"
+    else
+      echo "AVISO: sin --sha256 no se comprueba el archivo; usa el hash publicado en la web oficial."
+    fi
+    # Seguridad: nada de rutas absolutas ni '..' dentro del archivo.
+    if tar -tzf "${arch}" | grep -qE '(^/|(^|/)\.\.(/|$))'; then die "el archivo contiene rutas peligrosas"; fi
+    dest="${OPT}/${what}"
+    [[ ! -e "${dest}" ]] || die "ya existe ${dest}; bórralo primero para reinstalar"
+    tmp="$(mktemp -d "${OPT%/}.tmp.XXXXXX" 2>/dev/null || mktemp -d)"
+    trap 'rm -rf "${tmp}"' EXIT
+    tar -xzf "${arch}" -C "${tmp}" --no-same-owner --strip-components=1
+    [[ -f "${tmp}/${launcher}" ]] || die "no parece ${label}: falta ${launcher}"
+    mkdir -p "${OPT}"
+    mv -- "${tmp}" "${dest}"
+    trap - EXIT
+    mkdir -p "${APPS}"
+    {
+      echo "[Desktop Entry]"; echo "Type=Application"; echo "Name=${label}"
+      echo "Exec=\"${dest}/${launcher}\" %f"
+      if [[ -n "${icon}" && -f "${dest}/${icon}" ]]; then echo "Icon=${dest}/${icon}"; else echo "Icon=applications-development"; fi
+      echo "Categories=Development;IDE;"; echo "Terminal=false"
+    } > "${APPS}/novora-${what}.desktop"
+    echo "${label} instalado en ${dest} y añadido al menú."
+    ;;
+  -h|--help|ayuda) sed -n '2,15p' "$0" ;;
+  *) die "orden desconocida: ${cmd} (usa: novora-dev ayuda)" ;;
+esac

@@ -1,0 +1,46 @@
+#!/bin/sh
+# NOVORA OS Live — llamado por udev para cada disco/partición que aparece o
+# cambia. Por defecto marca el nodo en SOLO LECTURA (fail-closed).
+# Excepción: el disco desbloqueado por novora-disk-guard (por serie/WWN) y,
+# dentro de él, solo las particiones autorizadas por PARTUUID. Esto vuelve a
+# proteger las particiones hermanas cuando un particionador relee la tabla.
+# Variables de udev usadas: DEVNAME DEVTYPE ID_SERIAL_SHORT ID_SCSI_SERIAL
+#                           ID_WWN ID_WWN_WITH_EXTENSION ID_PART_ENTRY_UUID
+BLOCKDEV="${NOVORA_BLOCKDEV:-/usr/sbin/blockdev}"
+STATE="${NOVORA_STATE_DIR:-/run/novora}/unlocked.env"
+CMDLINE="${NOVORA_CMDLINE:-/proc/cmdline}"
+
+# Solo en la sesión Live; en el sistema instalado no hace nada.
+case " $(cat "$CMDLINE" 2>/dev/null) " in
+  *" boot=live "*) ;;
+  *) exit 0 ;;
+esac
+[ -n "$DEVNAME" ] || exit 0
+
+lock() { exec "$BLOCKDEV" --setro "$DEVNAME"; }
+
+[ -r "$STATE" ] || lock
+NOVORA_UNLOCK_SERIAL=''; NOVORA_UNLOCK_WWN=''; NOVORA_ALLOWED_PARTUUIDS=''
+# shellcheck disable=SC1090  # archivo generado por novora-disk-guard
+. "$STATE" || lock
+
+match=0
+if [ -n "$NOVORA_UNLOCK_SERIAL" ]; then
+  [ "$ID_SERIAL_SHORT" = "$NOVORA_UNLOCK_SERIAL" ] && match=1
+  [ "$ID_SCSI_SERIAL" = "$NOVORA_UNLOCK_SERIAL" ] && match=1
+fi
+if [ -n "$NOVORA_UNLOCK_WWN" ]; then
+  [ "$ID_WWN" = "$NOVORA_UNLOCK_WWN" ] && match=1
+  [ "$ID_WWN_WITH_EXTENSION" = "$NOVORA_UNLOCK_WWN" ] && match=1
+fi
+[ "$match" = 1 ] || lock
+
+if [ "$DEVTYPE" = "disk" ]; then
+  exit 0
+fi
+uuid=$(printf '%s' "$ID_PART_ENTRY_UUID" | tr '[:upper:]' '[:lower:]')
+[ -n "$uuid" ] || lock
+for allowed in $NOVORA_ALLOWED_PARTUUIDS; do
+  [ "$uuid" = "$allowed" ] && exit 0
+done
+lock

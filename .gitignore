@@ -1,0 +1,11 @@
+# Salidas de construcción de live-build y de scripts/build-iso.sh
+/build/
+/work/
+*.iso
+*.iso.sha256
+*.packages
+build.log
+# Modelos de ATLAS (pesados; se añaden con scripts/add-atlas-model.sh)
+*.gguf
+__pycache__/
+*.pyc

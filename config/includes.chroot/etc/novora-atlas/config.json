@@ -1,0 +1,10 @@
+{
+  "endpoint": "http://127.0.0.1:8181",
+  "manage_server": true,
+  "models_dirs": ["/usr/share/novora-atlas/models", "~/.local/share/novora-atlas/models"],
+  "context": 8192,
+  "gpu_layers": 99,
+  "server_idle_seconds": 600,
+  "web_port": 8190,
+  "ocr_langs": "spa+eng"
+}

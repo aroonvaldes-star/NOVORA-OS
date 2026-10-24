@@ -1,108 +1,151 @@
 #!/usr/bin/env python3
-"""Auditoría SOLO LECTURA de discos antes de instalar NOVORA OS."""
+"""NOVORA OS — auditoría SOLO LECTURA de discos antes de instalar (v0.2).
+
+No formatea, no particiona y no escribe en ningún disco. La única escritura
+posible es el archivo JSON de autorización (--emit-allowlist), por defecto en
+/run/novora (memoria, se pierde al apagar).
+
+Códigos de salida: 0 = sin bloqueos, 1 = cancelado/uso, 2 = error de lsblk,
+3 = selección BLOQUEADA.
+"""
+import argparse
 import json
 import os
-import subprocess
 import sys
 
-FIELDS = 'NAME,PATH,TYPE,SIZE,MODEL,SERIAL,TRAN,FSTYPE,MOUNTPOINT,PTTYPE'
+sys.path.insert(0, "/usr/lib/novora")
+sys.path.insert(0, os.environ.get("NOVORA_LIB", "/usr/lib/novora"))
+import novora_storage as ns  # noqa: E402
+
+DEFAULT_ALLOW = "/run/novora/allowlist.json"
 
 
-def human(num):
-    try:
-        n = float(num)
-        for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
-            if n < 1024 or unit == 'TiB':
-                return f'{n:.1f} {unit}'
-            n /= 1024
-    except (ValueError, TypeError):
-        return '?'
+def uefi_mode(args):
+    if args.assume_uefi:
+        return True
+    if args.assume_bios:
+        return False
+    return os.path.isdir("/sys/firmware/efi")
 
 
-def getdisks():
-    p = subprocess.run(['lsblk', '--json', '--bytes', '--output', FIELDS],
-                       text=True, capture_output=True, check=True)
-    return [x for x in json.loads(p.stdout)['blockdevices']
-            if x.get('type') == 'disk']
-
-
-def show():
-    print('=== NOVORA OS 0.1 | Auditoría de almacenamiento (SOLO LECTURA) ===')
-    print('Este programa NUNCA formatea, particiona ni escribe en el disco.\n')
-    print('Arranque actual:', 'UEFI' if os.path.isdir('/sys/firmware/efi') else 'BIOS/Legacy (o entorno sin UEFI)')
-    disks = getdisks()
+def show(tree, uefi, show_serial):
+    print("=== NOVORA OS | Auditoría de almacenamiento (SOLO LECTURA) ===")
+    print("Este programa NUNCA formatea, particiona ni escribe en discos.\n")
+    print("Arranque actual:", "UEFI" if uefi else "BIOS/Legacy")
     choices = []
-    for d in disks:
-        print(f"\nDISCO {d.get('path')}: {d.get('model') or 'sin modelo'} | "
-              f"{human(d.get('size'))} | serie={d.get('serial') or '?'} | "
-              f"bus={d.get('tran') or '?'} | tabla={d.get('pttype') or '?'}")
-        for p in d.get('children', []):
-            if p.get('type') != 'part':
-                continue
-            choices.append((d, p))
-            fs = p.get('fstype') or 'SIN FORMATO'
-            print(f"  [{len(choices)}] {p.get('path')} | {human(p.get('size'))} | "
-                  f"{fs} | montada={p.get('mountpoint') or 'no'}")
-    return disks, choices
+    for d in ns.disks(tree):
+        i = ns.identity(d)
+        serial = i["serial"] if show_serial else ns.mask(i["serial"])
+        live = "  [MEDIO LIVE]" if ns.is_live_medium(d) else ""
+        print(f"\nDISCO {d.get('path')}: {i['model'] or 'sin modelo'} | "
+              f"{ns.human(i['size'])} | serie={serial} | "
+              f"wwn={'sí' if i['wwn'] else 'no'} | bus={i['tran'] or '?'} | "
+              f"tabla={i['pttype'] or '?'} | sector={i['log_sec'] or '?'} B{live}")
+        for p in ns.partitions(d):
+            choices.append(p.get("path"))
+            mnt = ns.mounted_anywhere(p)
+            esp = " ESP" if ns.is_esp(p) else ""
+            print(f"  [{len(choices)}] {p.get('path')} | {ns.human(p.get('size'))} | "
+                  f"{p.get('fstype') or 'SIN FORMATO'}{esp} | "
+                  f"montada={'sí' if mnt else 'no'}")
+    return choices
 
 
-def main():
+def ask(choices, prompt):
     try:
-        disks, choices = show()
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError) as ex:
-        print('No se pudo consultar lsblk:', ex, file=sys.stderr)
-        return 2
-    if not choices:
-        print('\nNo se encontraron particiones seleccionables. No instalar.')
-        return 1
-    if '--interactive' not in sys.argv:
-        print('\nPara seleccionar y revisar una partición SIN modificarla: novora-storage-audit --interactive')
-        return 0
-    try:
-        selected = int(input('\nNúmero de partición candidata (0 cancela): ').strip())
+        raw = input(prompt).strip()
+        n = int(raw)
     except (ValueError, EOFError):
-        print('Cancelado.')
-        return 1
-    if selected == 0:
-        print('Cancelado.')
+        return None
+    if n < 1 or n > len(choices):
+        return None
+    return choices[n - 1]
+
+
+def report(findings):
+    order = {ns.BLOCK: 0, ns.WARN: 1, ns.INFO: 2}
+    for level, code, msg in sorted(findings, key=lambda x: order[x[0]]):
+        tag = {"BLOCK": "BLOQUEO", "WARN": "AVISO", "INFO": "INFO"}[level]
+        print(f"  [{tag} {code}] {msg}")
+
+
+def write_allow(path, allow):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(allow, fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    ap.add_argument("--interactive", action="store_true")
+    ap.add_argument("--target", help="partición raíz candidata (ruta actual)")
+    ap.add_argument("--esp", help="ESP del MISMO disco externo")
+    ap.add_argument("--emit-allowlist", nargs="?", const=DEFAULT_ALLOW,
+                    help=f"escribir autorización JSON (defecto {DEFAULT_ALLOW})")
+    ap.add_argument("--json", action="store_true", help="salida JSON")
+    ap.add_argument("--show-serial", action="store_true",
+                    help="mostrar serie completa (no compartir en informes)")
+    ap.add_argument("--lsblk-json", help=argparse.SUPPRESS)
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--assume-uefi", action="store_true", help=argparse.SUPPRESS)
+    g.add_argument("--assume-bios", action="store_true", help=argparse.SUPPRESS)
+    args = ap.parse_args(argv)
+
+    try:
+        tree = ns.load_tree(args.lsblk_json)
+    except (ns.StorageError, ValueError, OSError) as ex:
+        print("No se pudo consultar lsblk:", ex, file=sys.stderr)
+        return 2
+    uefi = uefi_mode(args)
+    choices = [] if args.json else show(tree, uefi, args.show_serial)
+    if args.json and not args.target:
+        choices = [p.get("path") for d in ns.disks(tree) for p in ns.partitions(d)]
+
+    target, esp = args.target, args.esp
+    if args.interactive and not target:
+        if not choices:
+            print("\nNo hay particiones. No instalar.")
+            return 1
+        target = ask(choices, "\nNúmero de la partición RAÍZ candidata (0 cancela): ")
+        if target is None:
+            print("Cancelado.")
+            return 1
+        if uefi:
+            esp = ask(choices, "Número de la ESP del MISMO disco externo (0 cancela): ")
+            if esp is None:
+                print("Cancelado.")
+                return 1
+    if not target:
+        if not args.json:
+            print("\nPara evaluar una selección SIN modificar nada:\n"
+                  "  novora-storage-audit --interactive")
         return 0
-    if selected < 1 or selected > len(choices):
-        print('Selección inexistente.')
-        return 1
-    disk, part = choices[selected - 1]
-    print('\nCANDIDATA:', part.get('path'))
-    print('DISCO PADRE:', disk.get('path'))
-    print('MODELO:', disk.get('model') or '(no informado)')
-    print('SERIE:', disk.get('serial') or '(no informada)')
-    print('CONEXIÓN:', disk.get('tran') or '(desconocida)')
-    print('FS:', part.get('fstype') or '(sin formato)')
-    print('TAMAÑO:', human(part.get('size')))
-    print('TABLA DE PARTICIONES:', disk.get('pttype') or '(desconocida)')
-    if disk.get('tran') != 'usb':
-        print('\nALERTA: No está identificado como disco USB externo. No instalar.')
+
+    findings, allow = ns.evaluate(tree, target, esp, uefi)
+    if args.json:
+        print(json.dumps({"target": target, "esp": esp, "uefi": uefi,
+                          "findings": findings, "approved": allow is not None},
+                         ensure_ascii=False, indent=2))
+    else:
+        print(f"\nEVALUACIÓN de raíz={target} esp={esp or '-'}:")
+        report(findings)
+    if allow is None:
+        if not args.json:
+            print("\nRESULTADO: BLOQUEADO. No se ha escrito ni modificado nada.")
         return 3
-    if part.get('mountpoint'):
-        print('\nALERTA: La partición está montada. No instalar.')
-        return 3
-    if part.get('fstype') in ('ntfs', 'exfat', 'vfat', 'fat', 'fat32', 'BitLocker'):
-        print('\nALERTA: Posibles datos/Windows o EFI. No formatear sin respaldo y verificación.')
-        return 3
-    if not (os.path.isdir('/sys/firmware/efi')):
-        print('\nATENCIÓN: Arranque BIOS; comprueba el modo de Windows antes de instalar.')
-    if disk.get('pttype') == 'dos':
-        print('\nATENCIÓN: Disco MBR. En UEFI/GPT suelen existir menos problemas de arranque;')
-        print('NO conviertas a GPT sin copia de seguridad y planificación.')
-    efi = [p for p in disk.get('children', [])
-           if p.get('type') == 'part' and p.get('fstype') in ('vfat', 'fat32')]
-    if not efi and os.path.isdir('/sys/firmware/efi'):
-        print('\nATENCIÓN: No se ve una partición FAT para EFI en este disco.')
-        print('Debes comprobar/crear una ESP EN SEAGATE antes de instalar; no usar la de Windows.')
-    print('\nInspección terminada. No se ha escrito ni modificado nada.')
-    print('En Calamares usa PARTICIONADO MANUAL y revisa que / y /boot/efi estén en Seagate.')
-    print('Nunca selecciones Borrar disco, ni marques Formatear en las particiones de Windows.')
-    print('Detente si el resumen propone escribir en el disco interno o en su partición EFI.')
+    if not args.json:
+        print("\nRESULTADO: sin bloqueos. Revisa todos los AVISOS antes de seguir.")
+    if args.emit_allowlist:
+        write_allow(args.emit_allowlist, allow)
+        if not args.json:
+            print(f"Autorización escrita en {args.emit_allowlist} (solo memoria).")
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

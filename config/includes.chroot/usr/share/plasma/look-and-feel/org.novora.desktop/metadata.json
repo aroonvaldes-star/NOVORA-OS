@@ -1,0 +1,12 @@
+{
+  "KPackageStructure": "Plasma/LookAndFeel",
+  "KPlugin": {
+    "Authors": [{ "Name": "NOVORA OS" }],
+    "Description": "Barra superior con menú global, dock inferior flotante, colores y fondo NOVORA (diseño original).",
+    "Id": "org.novora.desktop",
+    "License": "GPL-2.0-or-later",
+    "Name": "NOVORA",
+    "Version": "0.1.1"
+  },
+  "X-Plasma-APIVersion": "2"
+}

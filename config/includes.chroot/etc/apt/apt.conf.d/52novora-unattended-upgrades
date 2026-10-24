@@ -1,0 +1,14 @@
+// NOVORA OS: solo parches de seguridad de Debian; el resto lo decides tú (Discover).
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+        "origin=Debian,codename=${distro_codename},label=Debian-Security";
+};
+// Nunca reiniciar por su cuenta; se avisa cuando haga falta.
+Unattended-Upgrade::Automatic-Reboot "false";
+// Conservar el kernel anterior como respaldo en el menú de arranque.
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "false";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+// Portátil: no actualizar con batería ni en conexiones medidas (datos móviles).
+Unattended-Upgrade::OnlyOnACPower "true";
+Unattended-Upgrade::Skip-Updates-On-Metered-Connections "true";
+Unattended-Upgrade::MinimalSteps "true";

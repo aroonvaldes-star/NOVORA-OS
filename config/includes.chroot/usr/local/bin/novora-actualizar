@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# NOVORA OS — actualizaciones.
+#
+#   novora-actualizar estado                      pendientes, seguridad automática, reinicio
+#   sudo novora-actualizar ahora                  actualizar todo ahora (pide confirmación)
+#   sudo novora-actualizar instantaneas activar|desactivar
+#   novora-actualizar instantaneas listar
+#
+# Los parches de seguridad se instalan solos a diario (unattended-upgrades).
+# El resto lo avisa Discover una vez por semana y tú decides cuándo.
+set -Euo pipefail
+APT="${NOVORA_APT:-apt-get}"
+FLAG="${NOVORA_SNAP_FLAG:-/etc/novora/instantaneas-antes-de-actualizar}"
+die() { echo "novora-actualizar: $*" >&2; exit 1; }
+root() { [[ "${EUID}" -eq 0 ]] || die "requiere administrador: sudo novora-actualizar $*"; }
+cmd="${1:-estado}"; shift || true
+case "${cmd}" in
+  estado)
+    n="$(apt list --upgradable 2>/dev/null | grep -c '/' || true)"
+    echo "Actualizaciones pendientes: ${n}"
+    if [[ -f /etc/apt/apt.conf.d/20auto-upgrades ]] && grep -q 'Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades; then
+      echo "Parches de seguridad automáticos: activados"
+    else echo "Parches de seguridad automáticos: DESACTIVADOS"; fi
+    ulog=/var/log/unattended-upgrades/unattended-upgrades.log
+    [[ -f "${ulog}" ]] && echo "Última revisión automática: $(date -r "${ulog}" '+%Y-%m-%d %H:%M')"
+    [[ -f /var/run/reboot-required ]] && echo "REINICIO PENDIENTE para terminar de aplicar actualizaciones."
+    if [[ -f "${FLAG}" ]]; then echo "Instantánea antes de actualizar: activada"; else echo "Instantánea antes de actualizar: desactivada"; fi
+    echo "Kernels instalados (el anterior queda como respaldo en el menú de arranque):"
+    dpkg-query -W -f='  ${Package} ${Version}\n' 'linux-image-[0-9]*' 2>/dev/null || true
+    ;;
+  ahora)
+    root ahora
+    "${APT}" update || die "no se pudo consultar los repositorios (¿hay internet?)"
+    "${APT}" -s full-upgrade | grep -E '^(Inst|Remv)' | sed 's/^/  /' || true
+    read -r -p "¿Aplicar estas actualizaciones? escribe 'si': " a
+    [[ "${a}" == "si" ]] || { echo "Cancelado."; exit 1; }
+    DEBIAN_FRONTEND=noninteractive "${APT}" full-upgrade -y
+    [[ -f /var/run/reboot-required ]] && echo "Reinicia cuando puedas para terminar."
+    ;;
+  instantaneas)
+    sub="${1:-listar}"
+    case "${sub}" in
+      activar)
+        root instantaneas activar
+        command -v timeshift >/dev/null || die "Timeshift no está instalado."
+        mkdir -p "$(dirname "${FLAG}")"; touch "${FLAG}"
+        echo "Activado: antes de cada actualización se crea una instantánea (máx. 1 por hora)."
+        echo "Ocupa espacio en el disco del sistema; Timeshift conserva solo las más recientes." ;;
+      desactivar) root instantaneas desactivar; rm -f "${FLAG}"; echo "Desactivado." ;;
+      listar) command -v timeshift >/dev/null || die "Timeshift no está instalado."; exec timeshift --list ;;
+      *) die "uso: novora-actualizar instantaneas activar|desactivar|listar" ;;
+    esac
+    ;;
+  -h|--help|ayuda) sed -n '2,10p' "$0" ;;
+  *) die "orden desconocida: ${cmd}" ;;
+esac

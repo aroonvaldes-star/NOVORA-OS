@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Service
+MimeType=all/allfiles;inode/directory;
+Actions=analizar;
+X-KDE-Priority=TopLevel
+
+[Desktop Action analizar]
+Name=Analizar con antivirus
+Icon=security-medium
+Exec=konsole --hold -e novora-antivirus analizar %F

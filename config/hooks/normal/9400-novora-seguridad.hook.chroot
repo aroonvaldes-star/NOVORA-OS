@@ -1,0 +1,28 @@
+#!/bin/sh
+# NOVORA OS — seguridad: antivirus bajo demanda, cortafuegos y AppArmor.
+set -eu
+chmod 0755 /usr/local/bin/novora-antivirus
+
+# ClamAV: SIN demonio residente (consume ~1 GB de RAM). Solo freshclam, que
+# actualiza firmas cuando hay internet. Se incluyen firmas en la ISO para que
+# funcione sin conexión desde el primer arranque (si la descarga falla, avisa).
+if systemctl list-unit-files clamav-daemon.service >/dev/null 2>&1; then
+  systemctl disable clamav-daemon.service clamav-daemon.socket 2>/dev/null || true
+fi
+systemctl enable clamav-freshclam.service 2>/dev/null || true
+if command -v freshclam >/dev/null; then
+  if freshclam --stdout --quiet; then
+    echo "NOVORA SEGURIDAD: firmas de ClamAV incluidas en la ISO."
+  else
+    echo "NOVORA AVISO: no se pudieron descargar firmas de ClamAV durante la construcción."
+  fi
+fi
+
+# Cortafuegos: entrantes bloqueadas por defecto (zona public de NOVORA).
+if command -v firewall-offline-cmd >/dev/null; then
+  firewall-offline-cmd --set-default-zone=public >/dev/null || true
+fi
+systemctl enable firewalld.service 2>/dev/null || true
+
+# AppArmor (Debian lo activa por defecto); se asegura que el servicio esté habilitado.
+systemctl enable apparmor.service 2>/dev/null || true

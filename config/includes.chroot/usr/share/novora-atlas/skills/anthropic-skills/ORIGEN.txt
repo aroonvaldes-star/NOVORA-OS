@@ -1,0 +1,5 @@
+Origen: https://github.com/anthropics/skills
+Commit revisado: dbd4588f9e1033efb41dad4bef2f7947c8993d44 (2026-10-09)
+Incluidas SOLO las skills con licencia Apache-2.0 (LICENSE.txt dentro de cada una).
+EXCLUIDAS: docx, pdf, pptx, xlsx (licencia propietaria de Anthropic, no redistribuible)
+y doc-coauthoring (sin licencia declarada).

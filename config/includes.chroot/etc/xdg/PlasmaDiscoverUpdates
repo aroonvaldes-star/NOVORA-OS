@@ -1,0 +1,4 @@
+[Global]
+# NOVORA OS: avisar de actualizaciones normales una vez por semana (segundos).
+RequiredNotificationInterval=604800
+UseUnattendedUpdates=false

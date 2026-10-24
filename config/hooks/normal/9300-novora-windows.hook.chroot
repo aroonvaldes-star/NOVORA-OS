@@ -1,0 +1,83 @@
+#!/bin/sh
+# NOVORA OS — aplicaciones de Windows dentro del sistema.
+#  1) Wine 11 estable del repositorio oficial de WineHQ (nuevo WoW64, NTSync,
+#     driver Wayland). Respaldo: Wine 10 de Debian si WineHQ falla.
+#     Nota: winehq-stable 11.0 para trixie aún exige i386 (bug WineHQ 59343),
+#     por eso se habilita multiarch.
+#  2) DXVK (DirectX 9-11 -> Vulkan) y VKD3D-Proton (DirectX 12 -> Vulkan)
+#     incluidos en la ISO para optimizar prefijos SIN internet.
+#  3) winetricks (última versión publicada).
+# Cada descarga queda registrada con su versión y SHA256 en build.log.
+set -eu
+chmod 0755 /usr/local/bin/novora-win
+SHARE=/usr/share/novora-win
+mkdir -p "$SHARE"
+dpkg --print-foreign-architectures | grep -qx i386 || dpkg --add-architecture i386
+apt-get update
+
+wine_ok=0
+mkdir -p /etc/apt/keyrings && chmod 0755 /etc/apt/keyrings
+if wget -q -O- https://dl.winehq.org/wine-builds/winehq.key | gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key - \
+   && wget -q -O /etc/apt/sources.list.d/winehq-trixie.sources \
+        https://dl.winehq.org/wine-builds/debian/dists/trixie/winehq-trixie.sources \
+   && apt-get update \
+   && apt-get install -y --install-recommends winehq-stable; then
+  wine_ok=1
+  echo "NOVORA WIN: WineHQ $(wine --version 2>/dev/null || echo '?')"
+else
+  echo "NOVORA AVISO: WineHQ no disponible; se usa Wine de Debian."
+  rm -f /etc/apt/sources.list.d/winehq-trixie.sources
+  apt-get update
+  if apt-get install -y wine wine64 wine32:i386 fonts-wine; then
+    wine_ok=1
+    echo "NOVORA WIN: Debian $(wine --version 2>/dev/null || echo '?')"
+  fi
+fi
+[ "$wine_ok" -eq 1 ] || { echo "NOVORA AVISO: no se pudo instalar Wine."; }
+
+# Descarga la última versión publicada de un proyecto de GitHub (nombre de asset por patrón).
+fetch_release() {  # $1 repo, $2 regex del asset, $3 destino
+  url=$(wget -q -O- "https://api.github.com/repos/$1/releases/latest" | python3 -c '
+import json, re, sys
+d = json.load(sys.stdin)
+for a in d.get("assets", []):
+    if re.search(sys.argv[1], a["name"]):
+        print(d["tag_name"], a["browser_download_url"]); break' "$2") || return 1
+  [ -n "$url" ] || return 1
+  tag=${url%% *}; link=${url#* }
+  wget -q -O "$3" "$link" || return 1
+  echo "NOVORA WIN: $1 $tag sha256=$(sha256sum "$3" | cut -d' ' -f1)"
+}
+tmp=$(mktemp -d)
+if fetch_release doitsujin/dxvk 'dxvk-[0-9.]+\.tar\.gz$' "$tmp/dxvk.tar.gz"; then
+  rm -rf "$SHARE/dxvk"; mkdir -p "$SHARE/dxvk"
+  tar -xzf "$tmp/dxvk.tar.gz" -C "$SHARE/dxvk" --strip-components=1 --no-same-owner
+else echo "NOVORA AVISO: no se pudo descargar DXVK."; fi
+if fetch_release HansKristian-Arntzen/vkd3d-proton 'vkd3d-proton-[0-9.]+\.tar\.zst$' "$tmp/vkd3d.tar.zst"; then
+  rm -rf "$SHARE/vkd3d-proton"; mkdir -p "$SHARE/vkd3d-proton"
+  tar --zstd -xf "$tmp/vkd3d.tar.zst" -C "$SHARE/vkd3d-proton" --strip-components=1 --no-same-owner
+else echo "NOVORA AVISO: no se pudo descargar VKD3D-Proton."; fi
+wt_tag=$(wget -q -O- https://api.github.com/repos/Winetricks/winetricks/releases/latest \
+         | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null || true)
+if [ -n "$wt_tag" ] && wget -q -O /usr/local/bin/winetricks \
+     "https://raw.githubusercontent.com/Winetricks/winetricks/$wt_tag/src/winetricks"; then
+  chmod 0755 /usr/local/bin/winetricks
+  echo "NOVORA WIN: winetricks $wt_tag sha256=$(sha256sum /usr/local/bin/winetricks | cut -d' ' -f1)"
+else echo "NOVORA AVISO: no se pudo descargar winetricks."; fi
+rm -rf "$tmp"
+
+# Doble clic en .exe/.msi -> novora-win.
+mkdir -p /etc/xdg
+if ! grep -q novora-win /etc/xdg/mimeapps.list 2>/dev/null; then
+  cat >>/etc/xdg/mimeapps.list <<'MIME'
+[Default Applications]
+application/x-ms-dos-executable=novora-win.desktop
+application/x-msdownload=novora-win.desktop
+application/x-msi=novora-win.desktop
+application/vnd.microsoft.portable-executable=novora-win.desktop
+MIME
+fi
+# NTSync (Wine 11): el kernel de trixie (6.12) aún no trae /dev/ntsync; con un
+# kernel 6.14+ se carga solo y Wine lo usa automáticamente.
+mkdir -p /etc/modules-load.d
+echo ntsync > /etc/modules-load.d/novora-ntsync.conf

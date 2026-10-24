@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# NOVORA OS — antivirus bajo demanda (ClamAV), sin servicio residente.
+#
+#   novora-antivirus analizar RUTA...   analiza archivos o carpetas
+#   novora-antivirus estado             versión y antigüedad de las firmas
+#   sudo novora-antivirus actualizar    descarga firmas nuevas (requiere internet)
+#
+# Códigos: 0 limpio, 1 amenaza encontrada, 2 error o antivirus no disponible.
+set -Euo pipefail
+CLAMSCAN="${NOVORA_CLAMSCAN:-clamscan}"
+DBDIR="${NOVORA_CLAM_DB:-/var/lib/clamav}"
+notify() {
+  if command -v notify-send >/dev/null 2>&1; then notify-send -a "Antivirus NOVORA" -i "${3:-security-medium}" "$1" "${2:-}" || true; fi
+}
+cmd="${1:-estado}"; shift || true
+case "${cmd}" in
+  analizar)
+    [[ $# -ge 1 ]] || { echo "uso: novora-antivirus analizar RUTA..." >&2; exit 2; }
+    command -v "${CLAMSCAN}" >/dev/null 2>&1 || { echo "ClamAV no está instalado." >&2; exit 2; }
+    echo "Analizando: $*"
+    out="$("${CLAMSCAN}" --recursive --infected --no-summary --stdout -- "$@" 2>&1)"; rc=$?
+    case "${rc}" in
+      0) echo "Sin amenazas."; notify "Sin amenazas" "$*" security-high; exit 0 ;;
+      1) echo "AMENAZAS ENCONTRADAS:"; echo "${out}" | grep -E 'FOUND$' || echo "${out}"
+         notify "¡Amenaza encontrada!" "$(echo "${out}" | grep -m1 'FOUND$')" security-low; exit 1 ;;
+      *) echo "Error del antivirus (código ${rc}):"; echo "${out}" >&2; exit 2 ;;
+    esac
+    ;;
+  estado)
+    if command -v "${CLAMSCAN}" >/dev/null 2>&1; then echo "Motor: $("${CLAMSCAN}" --version 2>/dev/null)"; else echo "Motor: no instalado"; fi
+    shopt -s nullglob
+    dbs=("${DBDIR}"/*.c[lv]d)
+    if [[ ${#dbs[@]} -eq 0 ]]; then echo "Firmas: no hay (ejecuta: sudo novora-antivirus actualizar)"; else
+      newest_ts="$(stat -c %Y -- "${dbs[@]}" | sort -n | tail -1)"
+      age=$(( ($(date +%s) - newest_ts) / 86400 ))
+      echo "Firmas: ${#dbs[@]} bases; la más reciente tiene ${age} día(s)"
+      [[ "${age}" -gt 7 ]] && echo "AVISO: firmas con más de 7 días; conéctate a internet para actualizarlas."
+    fi
+    exit 0
+    ;;
+  actualizar)
+    [[ "${EUID}" -eq 0 ]] || { echo "Requiere administrador: sudo novora-antivirus actualizar" >&2; exit 2; }
+    exec freshclam
+    ;;
+  -h|--help|ayuda) sed -n '2,9p' "$0" ;;
+  *) echo "orden desconocida: ${cmd}" >&2; exit 2 ;;
+esac

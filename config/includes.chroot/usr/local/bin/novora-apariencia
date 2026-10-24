@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# NOVORA OS — apariencia del escritorio.
+#
+#   novora-apariencia claro | oscuro         esquema de color (el fondo cambia solo)
+#   novora-apariencia acento COLOR           azul, violeta, verde, naranja, rosa, rojo, grafito o #rrggbb
+#   novora-apariencia ligero on|off          sin desenfoques ni animaciones (equipos modestos / batería)
+#   novora-apariencia botones izquierda|derecha
+#   novora-apariencia restablecer            vuelve al diseño NOVORA (barra superior + dock)
+#   novora-apariencia estado
+#
+# Todo es reversible; también puedes ajustarlo en Configuración del sistema.
+set -Eeuo pipefail
+KW="${NOVORA_KWRITECONFIG:-kwriteconfig6}"
+KR="${NOVORA_KREADCONFIG:-kreadconfig6}"
+die() { echo "novora-apariencia: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+reconfigure_kwin() {
+  if have qdbus6; then qdbus6 org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+  elif have dbus-send; then dbus-send --session --dest=org.kde.KWin /KWin org.kde.KWin.reconfigure >/dev/null 2>&1 || true; fi
+}
+color_of() {
+  case "$1" in
+    azul) echo "#3b6cf6" ;; violeta) echo "#8b5cf6" ;; verde) echo "#1f9d55" ;;
+    naranja) echo "#ea7a1a" ;; rosa) echo "#e0457b" ;; rojo) echo "#d64545" ;; grafito) echo "#6b7280" ;;
+    \#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) echo "$1" ;;
+    *) return 1 ;;
+  esac
+}
+cmd="${1:-estado}"; shift || true
+case "${cmd}" in
+  claro|oscuro)
+    scheme=NovoraClaro; [[ "${cmd}" == oscuro ]] && scheme=NovoraOscuro
+    have plasma-apply-colorscheme || die "plasma-apply-colorscheme no disponible"
+    plasma-apply-colorscheme "${scheme}"
+    ;;
+  acento)
+    [[ $# -eq 1 ]] || die "uso: novora-apariencia acento COLOR"
+    c="$(color_of "$1")" || die "color no válido: $1"
+    have plasma-apply-colorscheme || die "plasma-apply-colorscheme no disponible"
+    plasma-apply-colorscheme --accent-color "${c}"
+    ;;
+  ligero)
+    case "${1:-}" in
+      on)  "${KW}" --file kwinrc --group Plugins --key blurEnabled false
+           "${KW}" --file kwinrc --group Plugins --key contrastEnabled false
+           "${KW}" --file kwinrc --group Plugins --key magiclampEnabled false
+           "${KW}" --file kdeglobals --group KDE --key AnimationDurationFactor 0
+           echo "Modo ligero activado: sin desenfoques ni animaciones." ;;
+      off) "${KW}" --file kwinrc --group Plugins --key blurEnabled true
+           "${KW}" --file kwinrc --group Plugins --key contrastEnabled true
+           "${KW}" --file kwinrc --group Plugins --key magiclampEnabled true
+           "${KW}" --file kdeglobals --group KDE --key AnimationDurationFactor 0.85
+           echo "Efectos NOVORA activados." ;;
+      *) die "uso: novora-apariencia ligero on|off" ;;
+    esac
+    reconfigure_kwin
+    ;;
+  botones)
+    case "${1:-}" in
+      izquierda) "${KW}" --file kwinrc --group org.kde.kdecoration2 --key ButtonsOnLeft XIA
+                 "${KW}" --file kwinrc --group org.kde.kdecoration2 --key ButtonsOnRight "" ;;
+      derecha)   "${KW}" --file kwinrc --group org.kde.kdecoration2 --key ButtonsOnLeft M
+                 "${KW}" --file kwinrc --group org.kde.kdecoration2 --key ButtonsOnRight IAX ;;
+      *) die "uso: novora-apariencia botones izquierda|derecha" ;;
+    esac
+    reconfigure_kwin
+    ;;
+  restablecer)
+    if have plasma-apply-lookandfeel; then exec plasma-apply-lookandfeel --apply org.novora.desktop --resetLayout
+    elif have lookandfeeltool; then exec lookandfeeltool --apply org.novora.desktop --resetLayout
+    else die "no encontré plasma-apply-lookandfeel"; fi
+    ;;
+  estado)
+    echo "Tema global: $("${KR}" --file kdeglobals --group KDE --key LookAndFeelPackage 2>/dev/null || echo '?')"
+    echo "Colores: $("${KR}" --file kdeglobals --group General --key ColorScheme 2>/dev/null || echo '?')"
+    echo "Acento: $("${KR}" --file kdeglobals --group General --key AccentColor 2>/dev/null || echo '?')"
+    blur="$("${KR}" --file kwinrc --group Plugins --key blurEnabled 2>/dev/null || echo '?')"
+    echo "Efectos: $([[ "${blur}" == false ]] && echo 'modo ligero' || echo 'completos')"
+    ;;
+  -h|--help|ayuda) sed -n '2,11p' "$0" ;;
+  *) die "orden desconocida: ${cmd} (usa: novora-apariencia ayuda)" ;;
+esac

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Aplicación de Windows
+Comment=Ejecuta programas de Windows (.exe/.msi) dentro de NOVORA OS con Wine
+Exec=novora-win ejecutar %f
+Icon=wine
+Terminal=false
+NoDisplay=true
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/x-msi;application/vnd.microsoft.portable-executable;
+Categories=System;

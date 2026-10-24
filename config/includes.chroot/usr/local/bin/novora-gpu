@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# NOVORA OS — gráficos: Intel, AMD y NVIDIA.
+#
+#   novora-gpu estado                       GPUs, driver en uso, Vulkan, VA-API, NVDEC, Secure Boot
+#   novora-gpu usar-nvidia PROGRAMA [args]  ejecuta en la GPU NVIDIA (laptops híbridas, PRIME)
+#   sudo novora-gpu nvidia instalar [--cuda] driver propietario + NVDEC/NVENC (+ CUDA)
+#   sudo novora-gpu nvidia quitar           vuelve a los drivers abiertos (nouveau/NVK)
+#
+# Por defecto NOVORA OS usa drivers abiertos (Mesa) que funcionan con las tres
+# marcas. El driver propietario de NVIDIA se instala solo en el sistema
+# INSTALADO (no en la sesión Live), con confirmación escrita, porque cambia el
+# kernel (DKMS) y con Secure Boot requiere registrar una clave (MOK).
+set -Eeuo pipefail
+APT="${NOVORA_APT:-apt-get}"
+SOURCES_DIR="${NOVORA_APT_SOURCES_DIR:-/etc/apt}"
+MODPROBE_DIR="${NOVORA_MODPROBE_DIR:-/etc/modprobe.d}"
+CMDLINE="${NOVORA_CMDLINE:-/proc/cmdline}"
+MOK_PUB="${NOVORA_MOK_PUB:-/var/lib/dkms/mok.pub}"
+NVIDIA_PKGS=(linux-headers-amd64 dkms nvidia-driver nvidia-smi nvidia-settings
+             libnvcuvid1 libnvidia-encode1 firmware-misc-nonfree)
+
+die() { echo "novora-gpu: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+gpus() {  # una línea por GPU: "vendor_id|descripción|driver"
+  have lspci || return 0
+  lspci -nnk 2>/dev/null | awk '
+    /^[0-9a-f]+:[0-9a-f]+\.[0-9] (VGA compatible controller|3D controller|Display controller)/ {
+      if (line) print line "|" drv
+      match($0, /\[[0-9a-f]{4}:[0-9a-f]{4}\]/); id=substr($0, RSTART+1, 4)
+      desc=$0; sub(/^[^:]+:[^:]+: /, "", desc); line=id "|" desc; drv="ninguno"; next }
+    line && /Kernel driver in use:/ { drv=$NF }
+    END { if (line) print line "|" drv }'
+}
+has_nvidia() { gpus | grep -q '^10de|'; }
+is_live() { grep -qw 'boot=live' "${CMDLINE}" 2>/dev/null; }
+sb_enabled() { have mokutil && mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; }
+
+cmd="${1:-estado}"; shift || true
+case "${cmd}" in
+  estado)
+    echo "== GPU =="
+    n=0
+    while IFS='|' read -r vid desc drv; do
+      [[ -n "${vid}" ]] || continue
+      n=$((n + 1))
+      case "${vid}" in 10de) brand=NVIDIA ;; 1002) brand=AMD ;; 8086) brand=Intel ;; *) brand="?" ;; esac
+      echo "${brand}: ${desc}  (driver: ${drv})"
+    done < <(gpus)
+    [[ "${n}" -ge 2 ]] && echo "Equipo híbrido: usa 'novora-gpu usar-nvidia PROGRAMA' para la GPU dedicada."
+    [[ "${n}" -eq 0 ]] && echo "No se detectaron GPUs (¿falta lspci?)"
+    echo "== Vulkan =="
+    if have vulkaninfo; then vulkaninfo --summary 2>/dev/null | grep -E 'deviceName|driverName' | sed 's/^ *//' || echo "sin dispositivos Vulkan"; else echo "vulkaninfo no instalado"; fi
+    echo "== Video por hardware =="
+    if have vainfo; then vainfo 2>/dev/null | grep -m1 -i 'driver version' || echo "VA-API: no disponible"; fi
+    if have nvidia-smi; then
+      nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | sed 's/^/NVIDIA propietario: /' || true
+    fi
+    if have ffmpeg; then
+      echo "FFmpeg hwaccels: $(ffmpeg -hide_banner -hwaccels 2>/dev/null | sed 1d | tr '\n' ' ')"
+    fi
+    echo "== Secure Boot =="
+    if have mokutil; then mokutil --sb-state 2>/dev/null || true; else echo "mokutil no instalado"; fi
+    ;;
+  usar-nvidia)
+    [[ $# -ge 1 ]] || die "uso: novora-gpu usar-nvidia PROGRAMA [argumentos]"
+    if [[ -d /sys/module/nvidia ]] || [[ "${NOVORA_FORCE_PROPRIETARY:-0}" == 1 ]]; then
+      export __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia __VK_LAYER_NV_optimus=NVIDIA_only
+    else
+      export DRI_PRIME=1   # drivers abiertos (nouveau/NVK) en equipos híbridos
+    fi
+    exec "$@"
+    ;;
+  nvidia)
+    action="${1:-}"; shift || true
+    [[ "${EUID}" -eq 0 ]] || die "requiere administrador: sudo novora-gpu nvidia ${action}"
+    if is_live; then die "estás en la sesión Live: instala NOVORA OS primero (el driver se compila para el sistema instalado)."; fi
+    case "${action}" in
+      instalar)
+        cuda=0; [[ "${1:-}" == "--cuda" ]] && cuda=1
+        has_nvidia || die "no se detectó ninguna GPU NVIDIA; no se instala nada."
+        echo "Se instalará el driver propietario de NVIDIA (Debian non-free):"
+        echo "  ${NVIDIA_PKGS[*]}$( [[ ${cuda} -eq 1 ]] && echo ' nvidia-cuda-toolkit')"
+        echo "Se habilitarán los componentes 'contrib' y 'non-free' de Debian."
+        sb_enabled && echo "Secure Boot está ACTIVADO: tendrás que registrar una clave (MOK) al reiniciar."
+        read -r -p "Escribe NVIDIA para continuar: " a
+        [[ "${a}" == "NVIDIA" ]] || { echo "Cancelado. No se cambió nada."; exit 1; }
+        # 1) contrib + non-free en las fuentes de APT (copia de seguridad antes).
+        changed=0
+        for f in "${SOURCES_DIR}/sources.list.d/debian.sources" "${SOURCES_DIR}/sources.list"; do
+          [[ -f "${f}" ]] || continue
+          cp -a -- "${f}" "${f}.novora-bak"
+          if [[ "${f}" == *.sources ]]; then
+            sed -i -E '/^Components:/{/ non-free( |$)/! s/$/ non-free/; / contrib( |$)/! s/$/ contrib/}' "${f}"
+          else
+            sed -i -E '/^deb(-src)? .*debian/{/ non-free( |$)/! s/$/ non-free/; / contrib( |$)/! s/$/ contrib/}' "${f}"
+          fi
+          changed=1
+        done
+        [[ "${changed}" -eq 1 ]] || die "no encontré las fuentes de APT en ${SOURCES_DIR}"
+        "${APT}" update
+        pkgs=("${NVIDIA_PKGS[@]}")
+        [[ "${cuda}" -eq 1 ]] && pkgs+=(nvidia-cuda-toolkit)
+        DEBIAN_FRONTEND=noninteractive "${APT}" install -y "${pkgs[@]}"
+        # 2) Wayland y consola gráfica con el driver propietario.
+        printf 'options nvidia-drm modeset=1 fbdev=1\n' > "${MODPROBE_DIR}/novora-nvidia.conf"
+        # 3) Secure Boot: firmar el módulo con una clave propia (MOK).
+        if sb_enabled; then
+          if have dkms && [[ ! -f "${MOK_PUB}" ]]; then dkms generate_mok || true; fi
+          if [[ -f "${MOK_PUB}" ]]; then
+            echo "Elige una contraseña temporal; al reiniciar aparecerá una pantalla azul (MOK Manager):"
+            echo "  Enroll MOK -> Continue -> Yes -> escribe esa contraseña -> Reboot."
+            mokutil --import "${MOK_PUB}"
+          else
+            echo "AVISO: no encontré ${MOK_PUB}; con Secure Boot el driver no cargará hasta registrar una clave."
+          fi
+        fi
+        if have update-initramfs; then update-initramfs -u; fi
+        echo "Listo. Reinicia para usar el driver de NVIDIA. Después: novora-gpu estado"
+        ;;
+      quitar)
+        read -r -p "Escribe QUITAR para volver a los drivers abiertos: " a
+        [[ "${a}" == "QUITAR" ]] || { echo "Cancelado."; exit 1; }
+        DEBIAN_FRONTEND=noninteractive "${APT}" purge -y 'nvidia-*' libnvcuvid1 libnvidia-encode1 || true
+        rm -f -- "${MODPROBE_DIR}/novora-nvidia.conf"
+        if have update-initramfs; then update-initramfs -u; fi
+        echo "Driver propietario quitado. Reinicia para volver a nouveau/NVK."
+        ;;
+      *) die "uso: sudo novora-gpu nvidia instalar [--cuda] | quitar" ;;
+    esac
+    ;;
+  -h|--help|ayuda) sed -n '2,13p' "$0" ;;
+  *) die "orden desconocida: ${cmd} (usa: novora-gpu ayuda)" ;;
+esac

@@ -1,0 +1,3 @@
+// NOVORA OS: instantánea del sistema antes de instalar/actualizar paquetes,
+// solo si se activó con `sudo novora-actualizar instantaneas activar`.
+DPkg::Pre-Invoke { "if [ -x /usr/lib/novora/novora-instantanea-pre-apt ]; then /usr/lib/novora/novora-instantanea-pre-apt || true; fi"; };

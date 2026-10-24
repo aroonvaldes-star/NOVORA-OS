@@ -1,0 +1,62 @@
+#!/bin/sh
+# shellcheck disable=SC1091  # build.conf lo genera build-iso.sh
+# NOVORA OS — instala el motor de ATLAS (llama-server, paquete Debian
+# llama.cpp-tools). Primero intenta trixie; si no hay candidato, trixie-backports.
+# Si no se puede instalar, ATLAS queda instalado pero avisa "sin motor"
+# (no rompe la ISO). NOVORA_ATLAS_ENGINE=required en
+# /etc/novora-atlas/build.conf hace que la construcción falle en ese caso.
+set -eu
+chmod 0755 /usr/local/bin/novora-atlas /usr/local/bin/atlas
+REQUIRED=optional
+[ -f /etc/novora-atlas/build.conf ] && . /etc/novora-atlas/build.conf
+REQUIRED="${NOVORA_ATLAS_ENGINE:-$REQUIRED}"
+
+has_candidate() {
+  apt-cache policy "$1" 2>/dev/null | grep -q 'Candidate: [0-9]'
+}
+installed=0
+if has_candidate llama.cpp-tools; then
+  apt-get install -y --no-install-recommends llama.cpp-tools && installed=1
+else
+  echo "ATLAS: llama.cpp-tools no está en trixie; probando trixie-backports"
+  cat >/etc/apt/sources.list.d/novora-backports.sources <<'SRC'
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: trixie-backports
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+SRC
+  apt-get update
+  if apt-get install -y --no-install-recommends -t trixie-backports llama.cpp-tools; then
+    installed=1
+  fi
+fi
+# Backend Vulkan de ggml (GPU sin controlador propietario, vía Mesa/NVK), si existe.
+for pkg in libggml0-backend-vulkan libggml-backend-vulkan; do
+  if has_candidate "$pkg"; then
+    apt-get install -y --no-install-recommends "$pkg" || true
+    break
+  fi
+done
+if [ "$installed" -ne 1 ]; then
+  echo "NOVORA AVISO: no se pudo instalar llama.cpp-tools; ATLAS funcionará sin motor."
+  [ "$REQUIRED" = "required" ] && exit 1
+fi
+# Office Oxide (MIT/Apache-2.0): ATLAS lee .docx/.xlsx/.pptx sin internet.
+VENDOR=/usr/lib/novora/atlas/vendor
+mkdir -p "$VENDOR"
+if python3 -m pip install --quiet --no-cache-dir --target "$VENDOR" office-oxide; then
+  ver=$(python3 -c "import sys; sys.path.insert(0, '$VENDOR'); import importlib.metadata as m; print(m.version('office-oxide'))" 2>/dev/null || echo '?')
+  echo "NOVORA ATLAS: Office Oxide $ver instalado."
+else
+  echo "NOVORA AVISO: no se pudo instalar Office Oxide; ATLAS no leerá documentos de Office."
+fi
+if command -v llama-server >/dev/null; then
+  echo "ATLAS: $(llama-server --version 2>&1 | head -1)"
+fi
+if ls /usr/share/novora-atlas/models/*.gguf >/dev/null 2>&1; then
+  echo "ATLAS: modelos incluidos en la ISO:"
+  ls -la /usr/share/novora-atlas/models/
+else
+  echo "ATLAS: la ISO no incluye modelo (se instala luego con 'novora-atlas modelo instalar')."
+fi

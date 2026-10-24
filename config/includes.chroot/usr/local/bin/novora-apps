@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""NOVORA OS — catálogo de aplicaciones opcionales.
+
+  novora-apps lista                 qué hay y qué tienes instalado
+  novora-apps instalar NOMBRE       descarga la última versión oficial y la instala
+  novora-apps quitar NOMBRE
+  novora-apps info NOMBRE
+
+Seguridad:
+  * Solo descarga de los releases oficiales de GitHub o del registro oficial de npm.
+  * Cada archivo de GitHub se comprueba contra la huella SHA256 que GitHub publica
+    para ese archivo; sin huella, no se instala (salvo --sin-verificar, explícito).
+  * Las IAs de la nube avisan de que tus datos saldrán del equipo y piden 'si'.
+  * Nada se preinstala: todo es a petición tuya.
+"""
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.error
+import urllib.request
+
+API = os.environ.get("NOVORA_APPS_API", "https://api.github.com")
+PKEXEC = os.environ.get("NOVORA_APPS_PKEXEC", "pkexec")
+NPM = os.environ.get("NOVORA_APPS_NPM", "npm")
+NODE = os.environ.get("NOVORA_APPS_NODE", "node")
+HOME = os.path.expanduser("~")
+DATA = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local/share"), "novora-apps")
+CONFIG = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache"), "novora-apps")
+LOCAL = os.path.join(HOME, ".local")
+APPS_DIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(HOME, ".local/share"), "applications")
+
+CATALOG = {
+    # --- Oficina -------------------------------------------------------------
+    "genoffice": dict(cat="Oficina", kind="deb", repo="genspark-ai/genoffice", asset=r"_amd64\.deb$",
+                      license="Apache-2.0 (la carpeta ee/ tiene licencia propia)",
+                      desc="Suite tipo Office con IA; NOVORA la deja SIN analíticas y conectada a la IA local de ATLAS",
+                      post="genoffice"),
+    # --- Música --------------------------------------------------------------
+    "spotifast": dict(cat="Música", kind="deb", repo="crmne/spotifast", asset=r"_amd64\.deb$",
+                      license="MIT", desc="Cliente nativo y ligero de Spotify (requiere Spotify Premium)",
+                      notice="Spotifast es un cliente NO oficial de Spotify (usa librespot) y requiere Premium."),
+    "zuno": dict(cat="Música", kind="deb", repo="noFAYZ/zuno", asset=r"_amd64\.deb$",
+                 license="Apache-2.0", desc="Cliente de escritorio para YouTube Music",
+                 notice="Zuno es un cliente NO oficial de YouTube Music. Descargar música puede "
+                        "incumplir los Términos de Servicio de YouTube; la responsabilidad es tuya.",
+                 confirm="ACEPTO"),
+    # --- Información ---------------------------------------------------------
+    "huntly": dict(cat="Información", kind="deb", repo="lcomplete/huntly", asset=r"_amd64\.deb$",
+                   license="Apache-2.0", desc="Archivo personal de artículos, RSS y tuits con búsqueda local"),
+    # --- IA en la nube (opcionales) ------------------------------------------
+    "omniroute": dict(cat="IA en la nube", kind="deb", repo="cheaper-inference/OmniRoute", asset=r"amd64\.deb$",
+                      cloud="los proveedores que conectes en OmniRoute (Claude, GPT, Gemini, Kimi…)",
+                      license="MIT",
+                      desc="Pasarela de IA local (127.0.0.1:20128) hacia cientos de proveedores con tus cuentas; "
+                           "activa el modo nube opcional de ATLAS",
+                      notice="NOVORA la limita a 127.0.0.1 (por defecto escucha en toda la red). NUNCA actives "
+                             "su modo MITM/TPROXY: instala una autoridad de certificados capaz de descifrar tu "
+                             "tráfico HTTPS. Revisa los términos de cada proveedor: algunos prohíben usar sus "
+                             "cuentas o niveles gratuitos desde clientes de terceros.",
+                      post="omniroute"),
+    "claude-code": dict(cat="IA en la nube", kind="npm", pkg="@anthropic-ai/claude-code", bin="claude",
+                        min_node=18, cloud="Anthropic (Claude)", license="propietaria (términos de Anthropic)",
+                        desc="Agente de programación de Claude en la terminal; se inicia con tu cuenta de Claude"),
+    "codex": dict(cat="IA en la nube", kind="npm", pkg="@openai/codex", bin="codex", min_node=18,
+                  cloud="OpenAI (ChatGPT/Codex)", license="Apache-2.0",
+                  desc="Agente de programación de OpenAI en la terminal; se inicia con tu cuenta de ChatGPT"),
+    "gemini-cli": dict(cat="IA en la nube", kind="npm", pkg="@google/gemini-cli", bin="gemini", min_node=20,
+                       cloud="Google (Gemini)", license="Apache-2.0",
+                       desc="Agente de Gemini en la terminal; se inicia con tu cuenta de Google"),
+    "copilot-cli": dict(cat="IA en la nube", kind="tar", repo="github/copilot-cli",
+                        asset=r"linux-(x64|amd64).*\.tar\.gz$", bin="copilot", cloud="GitHub (Copilot)",
+                        license="propietaria (términos de GitHub)",
+                        desc="GitHub Copilot en la terminal (binario oficial; requiere suscripción de Copilot)"),
+}
+
+
+class AppsError(Exception):
+    pass
+
+
+# --- estado local --------------------------------------------------------------
+def _state_path():
+    return os.path.join(DATA, "instalado.json")
+
+
+def load_state():
+    try:
+        with open(_state_path(), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(st):
+    os.makedirs(DATA, exist_ok=True)
+    tmp = _state_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(st, fh, indent=1, ensure_ascii=False)
+    os.replace(tmp, _state_path())
+
+
+def ask(prompt, expected):
+    try:
+        return input(prompt).strip() == expected
+    except EOFError:
+        return False
+
+
+# --- GitHub --------------------------------------------------------------------
+def latest_release(repo):
+    req = urllib.request.Request(f"{API}/repos/{repo}/releases/latest",
+                                 headers={"Accept": "application/vnd.github+json",
+                                          "User-Agent": "novora-apps"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except (urllib.error.URLError, OSError, ValueError) as ex:
+        raise AppsError(f"no se pudo consultar GitHub ({repo}): {ex}") from ex
+
+
+def pick_asset(release, pattern):
+    for a in release.get("assets", []):
+        if re.search(pattern, a.get("name", "")):
+            return a
+    raise AppsError(f"el release {release.get('tag_name')} no tiene un archivo para Linux x86-64")
+
+
+def download_verified(asset, allow_unverified):
+    digest = (asset.get("digest") or "").lower()
+    if not digest.startswith("sha256:") and not allow_unverified:
+        raise AppsError("GitHub no publica la huella SHA256 de este archivo; no se instala "
+                        "(usa --sin-verificar solo si confías en el origen).")
+    os.makedirs(CACHE, exist_ok=True)
+    name = os.path.basename(asset["name"])
+    if not re.fullmatch(r"[A-Za-z0-9._+-]+", name):
+        raise AppsError("nombre de archivo inesperado")
+    dest = os.path.join(CACHE, name)
+    h = hashlib.sha256()
+    req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "novora-apps"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r, open(dest + ".part", "wb") as out:
+            for chunk in iter(lambda: r.read(1 << 20), b""):
+                h.update(chunk)
+                out.write(chunk)
+    except (urllib.error.URLError, OSError) as ex:
+        raise AppsError(f"descarga fallida: {ex}") from ex
+    got = "sha256:" + h.hexdigest()
+    if digest.startswith("sha256:") and got != digest:
+        os.remove(dest + ".part")
+        raise AppsError(f"la huella SHA256 NO coincide (esperada {digest}, obtenida {got}); descartado")
+    os.replace(dest + ".part", dest)
+    print(f"Verificado {name}: {got}" if digest else f"SIN verificar {name}: {got}")
+    return dest
+
+
+# --- tipos de instalación ------------------------------------------------------
+def install_deb(name, app, allow_unverified):
+    rel = latest_release(app["repo"])
+    path = download_verified(pick_asset(rel, app["asset"]), allow_unverified)
+    pkg = subprocess.run(["dpkg-deb", "-f", path, "Package"], capture_output=True, text=True).stdout.strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.+-]*", pkg or ""):
+        raise AppsError("el .deb no tiene un nombre de paquete válido")
+    r = subprocess.run([PKEXEC, "apt-get", "install", "-y", path])
+    if r.returncode != 0:
+        raise AppsError("apt no pudo instalar el paquete")
+    return {"tipo": "deb", "paquete": pkg, "version": rel.get("tag_name")}
+
+
+def node_major():
+    try:
+        out = subprocess.run([NODE, "--version"], capture_output=True, text=True).stdout.strip()
+        return int(out.lstrip("v").split(".")[0])
+    except (OSError, ValueError):
+        return 0
+
+
+def install_npm(name, app, _allow):
+    need = app.get("min_node", 18)
+    have = node_major()
+    if have < need:
+        raise AppsError(f"{name} necesita Node.js {need} o superior (tienes {have or 'ninguno'})")
+    r = subprocess.run([NPM, "install", "-g", "--prefix", LOCAL, app["pkg"]])
+    if r.returncode != 0:
+        raise AppsError("npm no pudo instalar el paquete")
+    return {"tipo": "npm", "paquete": app["pkg"], "bin": app["bin"]}
+
+
+def install_tar(name, app, allow_unverified):
+    rel = latest_release(app["repo"])
+    path = download_verified(pick_asset(rel, app["asset"]), allow_unverified)
+    dest = os.path.join(LOCAL, "opt", "novora-apps", name)
+    shutil.rmtree(dest, ignore_errors=True)
+    os.makedirs(dest)
+    try:
+        with tarfile.open(path) as tf:
+            tf.extractall(dest, filter="data")  # bloquea rutas absolutas, '..' y enlaces peligrosos
+    except (tarfile.TarError, OSError) as ex:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise AppsError(f"archivo rechazado: {ex}") from ex
+    found = None
+    for root, _dirs, files in os.walk(dest):
+        if app["bin"] in files:
+            found = os.path.join(root, app["bin"])
+            break
+    if not found:
+        raise AppsError(f"el archivo no contiene el programa '{app['bin']}'")
+    os.chmod(found, 0o755)
+    os.makedirs(os.path.join(LOCAL, "bin"), exist_ok=True)
+    link = os.path.join(LOCAL, "bin", app["bin"])
+    if os.path.lexists(link):
+        os.remove(link)
+    os.symlink(found, link)
+    return {"tipo": "tar", "dir": dest, "enlace": link, "version": rel.get("tag_name")}
+
+
+# --- ajustes posteriores -------------------------------------------------------
+def post_genoffice(info):
+    """Sin analíticas (antes del primer arranque) y con la IA local de ATLAS."""
+    d = os.path.join(CONFIG, "GenOffice")
+    os.makedirs(d, exist_ok=True)
+    app_settings = os.path.join(d, "app-settings.json")
+    try:
+        with open(app_settings, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        st = {}
+    st["analyticsEnabled"] = False
+    with open(app_settings, "w", encoding="utf-8") as fh:
+        json.dump(st, fh, indent=1)
+    ai = os.path.join(d, "ai-settings.json")
+    if not os.path.exists(ai):
+        with open(ai, "w", encoding="utf-8") as fh:
+            json.dump({"provider": "custom",
+                       "providers": {"custom": {"apiKey": "local", "model": "novora-atlas",
+                                                "baseUrl": "http://127.0.0.1:8181/v1"}},
+                       "gskToolsEnabled": False}, fh, indent=1)
+    # Lanzador que arranca el motor de ATLAS mientras GenOffice está abierto.
+    pkg = info.get("paquete")
+    files = subprocess.run(["dpkg", "-L", pkg], capture_output=True, text=True).stdout.split() if pkg else []
+    for f in files:
+        if f.startswith("/usr/share/applications/") and f.endswith(".desktop") and os.path.isfile(f):
+            with open(f, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+            out = [("Exec=novora-con-ia-local " + ln[5:]) if ln.startswith("Exec=") else ln for ln in lines]
+            os.makedirs(APPS_DIR, exist_ok=True)
+            with open(os.path.join(APPS_DIR, os.path.basename(f)), "w", encoding="utf-8") as fh:
+                fh.write("\n".join(out) + "\n")
+    print("GenOffice: analíticas DESACTIVADAS y IA conectada a ATLAS (local, sin internet).")
+    print("Puedes añadir Claude, GPT o Gemini en GenOffice → Ajustes → IA si quieres usar la nube.")
+
+
+def post_omniroute(_info):
+    """Escuchar solo en este equipo (la sesión gráfica lee environment.d)."""
+    d = os.path.join(CONFIG, "environment.d")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "90-novora-omniroute.conf"), "w", encoding="utf-8") as fh:
+        fh.write("# NOVORA OS: OmniRoute solo accesible desde este equipo.\n"
+                 "API_HOST=127.0.0.1\nOMNIROUTE_SERVER_HOST=127.0.0.1\nHOST=127.0.0.1\n"
+                 "LIVE_WS_HOST=127.0.0.1\n")
+    print("OmniRoute: limitado a 127.0.0.1 (cierra sesión y vuelve a entrar para aplicarlo).")
+    print("Para usarlo desde ATLAS: crea una clave en OmniRoute (Dashboard → Endpoints) y ejecuta")
+    print("  atlas nube activar")
+    print("ATLAS seguirá siendo local salvo en las consultas que marques como ☁ nube.")
+
+
+INSTALLERS = {"deb": install_deb, "npm": install_npm, "tar": install_tar}
+POST = {"genoffice": post_genoffice, "omniroute": post_omniroute}
+
+
+def cmd_list():
+    st = load_state()
+    cat = None
+    for name, app in sorted(CATALOG.items(), key=lambda kv: (kv[1]["cat"], kv[0])):
+        if app["cat"] != cat:
+            cat = app["cat"]
+            print(f"\n== {cat} ==")
+        mark = "✔" if name in st else " "
+        cloud = "  [nube]" if app.get("cloud") else ""
+        print(f" [{mark}] {name:12} {app['desc']}{cloud}")
+    print("\nInstalar: novora-apps instalar NOMBRE")
+    return 0
+
+
+def cmd_install(name, allow_unverified):
+    app = CATALOG.get(name)
+    if not app:
+        raise AppsError(f"no existe '{name}' en el catálogo (usa: novora-apps lista)")
+    print(f"{name}: {app['desc']}\nLicencia: {app['license']}")
+    if app.get("cloud"):
+        print(f"\nAVISO: esta herramienta envía tus preguntas, código y archivos a {app['cloud']}.\n"
+              "Necesita internet y tu cuenta. ATLAS, en cambio, es 100 % local.")
+    if app.get("notice"):
+        print(f"\nAVISO: {app['notice']}")
+    word = app.get("confirm", "si")
+    if not ask(f"\nPara instalar escribe '{word}': ", word):
+        print("Cancelado. No se instaló nada.")
+        return 1
+    info = INSTALLERS[app["kind"]](name, app, allow_unverified)
+    if name in POST:
+        POST[name](info)
+    st = load_state()
+    st[name] = info
+    save_state(st)
+    print(f"{name} instalado.")
+    return 0
+
+
+def cmd_remove(name):
+    st = load_state()
+    info = st.get(name)
+    if not info:
+        raise AppsError(f"'{name}' no fue instalado con novora-apps")
+    if info["tipo"] == "deb":
+        subprocess.run([PKEXEC, "apt-get", "remove", "-y", info["paquete"]], check=False)
+    elif info["tipo"] == "npm":
+        subprocess.run([NPM, "uninstall", "-g", "--prefix", LOCAL, info["paquete"]], check=False)
+    elif info["tipo"] == "tar":
+        if os.path.lexists(info["enlace"]):
+            os.remove(info["enlace"])
+        shutil.rmtree(info["dir"], ignore_errors=True)
+    del st[name]
+    save_state(st)
+    print(f"{name} quitado.")
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="novora-apps", description="Catálogo de apps opcionales de NOVORA OS")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("lista")
+    i = sub.add_parser("instalar")
+    i.add_argument("nombre")
+    i.add_argument("--sin-verificar", action="store_true", help="permitir archivos sin huella SHA256 publicada")
+    q = sub.add_parser("quitar")
+    q.add_argument("nombre")
+    n = sub.add_parser("info")
+    n.add_argument("nombre")
+    args = ap.parse_args(argv)
+    try:
+        if args.cmd in (None, "lista"):
+            return cmd_list()
+        if args.cmd == "instalar":
+            return cmd_install(args.nombre, args.sin_verificar)
+        if args.cmd == "quitar":
+            return cmd_remove(args.nombre)
+        app = CATALOG.get(args.nombre)
+        if not app:
+            raise AppsError(f"no existe '{args.nombre}'")
+        print(json.dumps(app, ensure_ascii=False, indent=1))
+        return 0
+    except AppsError as ex:
+        print(f"novora-apps: {ex}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

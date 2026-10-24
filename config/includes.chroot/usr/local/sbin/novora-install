@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# NOVORA OS — lanzador del instalador con guardián de discos (requiere root).
+# Flujo: bloqueo total -> auditoría y selección -> confirmación escrita ->
+# desbloqueo SOLO del disco autorizado -> verificación -> Calamares ->
+# bloqueo total de nuevo.
+#
+# v0.1.1: la instalación en HARDWARE FÍSICO está deshabilitada hasta superar
+# las pruebas P0 en VM (ver AUDITORIA-CLAUDE.md). Solo se permite en VM.
+set -Eeuo pipefail
+ALLOW=/run/novora/allowlist.json
+GUARD=/usr/local/sbin/novora-disk-guard
+AUDIT=/usr/local/bin/novora-storage-audit
+
+relock() { "$GUARD" lockdown >/dev/null 2>&1 || true; }
+trap relock EXIT
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo 'Ejecuta con: pkexec novora-install' >&2; exit 1
+fi
+virt="$(systemd-detect-virt --vm 2>/dev/null || true)"
+if [[ -z "${virt}" || "${virt}" == "none" ]]; then
+  cat >&2 <<'EOF'
+INSTALACIÓN FÍSICA BLOQUEADA en NOVORA OS 0.1.1.
+El instalador solo puede usarse en una máquina virtual con discos desechables
+hasta que las pruebas P0 (T03–T08, T11, T12) estén aprobadas con evidencia.
+No se ha escrito nada en ningún disco.
+EOF
+  exit 4
+fi
+echo "Máquina virtual detectada (${virt}). Modo de pruebas."
+
+"$GUARD" lockdown
+rm -f "${ALLOW}"
+if ! "$AUDIT" --interactive --emit-allowlist "${ALLOW}"; then
+  echo 'Selección bloqueada o cancelada. No se ha escrito nada.' >&2; exit 3
+fi
+code="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"]["partuuid"][-6:])' "${ALLOW}")"
+echo
+echo "Para continuar escribe exactamente: INSTALAR ${code}"
+read -r answer
+if [[ "${answer}" != "INSTALAR ${code}" ]]; then
+  echo 'Confirmación incorrecta. Cancelado; no se ha escrito nada.' >&2; exit 1
+fi
+"$GUARD" unlock --allowlist "${ALLOW}" --apply
+"$GUARD" verify --allowlist "${ALLOW}"
+echo 'Abriendo Calamares. Usa PARTICIONADO MANUAL; los demás discos no aparecerán.'
+calamares -d || echo "Calamares terminó con código $?" >&2
+"$GUARD" verify --allowlist "${ALLOW}" || echo 'AVISO: el estado de bloqueo cambió durante la instalación.' >&2

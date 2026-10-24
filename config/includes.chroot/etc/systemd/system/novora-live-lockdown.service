@@ -1,0 +1,16 @@
+[Unit]
+Description=NOVORA OS Live: discos en solo-lectura y NVRAM EFI protegida
+Documentation=file:///usr/share/doc/novora/AUDITORIA-CLAUDE.md
+DefaultDependencies=no
+ConditionKernelCommandLine=boot=live
+After=systemd-udevd.service systemd-udev-trigger.service
+Before=udisks2.service display-manager.service local-fs.target
+Wants=systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/novora-disk-guard lockdown
+
+[Install]
+WantedBy=sysinit.target

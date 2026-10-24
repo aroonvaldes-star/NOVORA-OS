@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# NOVORA OS — ejecutar aplicaciones de Windows dentro del sistema con Wine.
+# Cada aplicación usa su propio prefijo (su propia "C:") en
+# ~/.local/share/novora-win/<nombre>, para que una app no estropee a otra.
+#
+#   novora-win ejecutar ARCHIVO.exe|.msi [argumentos]   (doble clic usa esto)
+#   novora-win optimizar NOMBRE        DXVK + VKD3D-Proton (sin internet), GameMode y GPU dedicada
+#   novora-win perfil NOMBRE [CLAVE=VALOR...]   ver/cambiar el perfil de una app
+#   novora-win apps                    lista prefijos
+#   novora-win dotnet NOMBRE           .NET Desktop Runtime 8 en el prefijo (requiere internet una vez)
+#   novora-win config NOMBRE           configuración de Wine del prefijo
+#   novora-win borrar NOMBRE           elimina un prefijo (pide confirmación)
+#   novora-win estado
+#
+# Perfil (~/.config/novora-win/perfiles/NOMBRE.conf): GPU=auto|nvidia,
+# GAMEMODE=0|1, WAYLAND=0|1, DLL_OVERRIDES=..., DXVK_HUD=...
+# Antes de la primera ejecución de cada .exe/.msi se analiza con el antivirus.
+set -Eeuo pipefail
+BASE="${NOVORA_WIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/novora-win}"
+PROFILES="${NOVORA_WIN_PROFILES:-${XDG_CONFIG_HOME:-$HOME/.config}/novora-win/perfiles}"
+SHARE="${NOVORA_WIN_SHARE:-/usr/share/novora-win}"
+WINE="${NOVORA_WINE:-wine}"
+PROFILE_KEYS="GPU GAMEMODE WAYLAND DLL_OVERRIDES DXVK_HUD"
+mkdir -p "${BASE}"
+
+die() { echo "novora-win: $*" >&2; exit 1; }
+notify() {
+  if command -v notify-send >/dev/null; then notify-send -a "Apps de Windows" "$1" "${2:-}" || true; fi
+}
+name_for() {  # nombre de prefijo estable a partir del archivo
+  local n; n="$(basename -- "$1")"; n="${n%.*}"
+  n="$(printf '%s' "${n}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-48)"
+  [[ -n "${n}" && "${n}" != "." && "${n}" != ".." ]] || n="app"
+  printf '%s' "${n}"
+}
+check_name() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ && "$1" != "." && "$1" != ".." ]] || die "nombre no válido: $1"; }
+prefix_of() { check_name "$1"; printf '%s/%s' "${BASE}" "$1"; }
+is_pe() { [[ "$(head -c 2 -- "$1" 2>/dev/null)" == "MZ" ]]; }
+is_msi() { [[ "$(head -c 8 -- "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" == "d0cf11e0a1b11ae1" ]]; }
+
+# Lee el perfil sin ejecutarlo (solo claves permitidas, valores sin metacaracteres).
+declare -A P=([GPU]=auto [GAMEMODE]=0 [WAYLAND]=0 [DLL_OVERRIDES]="" [DXVK_HUD]="")
+load_profile() {
+  local f="${PROFILES}/$1.conf" k v
+  [[ -f "${f}" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ -z "${k}" || "${k}" == \#* ]] && continue
+    [[ " ${PROFILE_KEYS} " == *" ${k} "* ]] || continue
+    [[ "${v}" =~ ^[A-Za-z0-9_.,=:+-]*$ ]] || continue
+    P[${k}]="${v}"
+  done < "${f}"
+}
+save_profile() {
+  mkdir -p "${PROFILES}"
+  local k
+  for k in ${PROFILE_KEYS}; do printf '%s=%s\n' "${k}" "${P[${k}]}"; done > "${PROFILES}/$1.conf"
+}
+set_kv() {  # CLAVE=VALOR validado
+  local k="${1%%=*}" v="${1#*=}"
+  [[ " ${PROFILE_KEYS} " == *" ${k} "* ]] || die "clave desconocida: ${k} (válidas: ${PROFILE_KEYS})"
+  [[ "${v}" =~ ^[A-Za-z0-9_.,=:+-]*$ ]] || die "valor no permitido para ${k}"
+  case "${k}" in
+    GPU) [[ "${v}" =~ ^(auto|nvidia)$ ]] || die "GPU=auto|nvidia" ;;
+    GAMEMODE|WAYLAND) [[ "${v}" =~ ^[01]$ ]] || die "${k}=0|1" ;;
+  esac
+  P[${k}]="${v}"
+}
+has_nvidia() { command -v novora-gpu >/dev/null && novora-gpu estado 2>/dev/null | grep -q '^NVIDIA:'; }
+
+cmd="${1:-estado}"; shift || true
+case "${cmd}" in
+  ejecutar)
+    [[ $# -ge 1 ]] || die "uso: novora-win ejecutar ARCHIVO.exe"
+    f="$(realpath -- "$1")"; shift
+    [[ -f "${f}" ]] || die "no existe: ${f}"
+    is_pe "${f}" || is_msi "${f}" || die "no parece un programa de Windows (.exe/.msi): ${f}"
+    command -v "${WINE}" >/dev/null || die "Wine no está instalado."
+    # Antivirus antes de la PRIMERA ejecución (por SHA256; si cambia, se repite).
+    if command -v novora-antivirus >/dev/null; then
+      scanned="${BASE}/.analizados"
+      h="$(sha256sum -- "${f}" | cut -d' ' -f1)"
+      if ! grep -qx "${h}" "${scanned}" 2>/dev/null; then
+        notify "Analizando ${f##*/}" "Antivirus antes de la primera ejecución…"
+        set +e; novora-antivirus analizar "${f}" >/dev/null 2>&1; src=$?; set -e
+        case "${src}" in
+          0) echo "${h}" >> "${scanned}" ;;
+          1) notify "Bloqueado: ${f##*/}" "El antivirus encontró una amenaza. No se ejecutó."
+             die "amenaza detectada en ${f}; no se ejecuta." ;;
+          *) notify "Antivirus no disponible" "Se abre ${f##*/} sin analizar."
+             echo "AVISO: no se pudo analizar ${f}; se ejecuta sin análisis." >&2 ;;
+        esac
+      fi
+    fi
+    name="${NOVORA_WIN_PREFIX:-$(name_for "${f}")}"
+    pfx="$(prefix_of "${name}")"
+    export WINEPREFIX="${pfx}" WINEDEBUG="${WINEDEBUG:--all}"
+    # Nota: el prefijo separa la configuración de cada app, pero Wine NO es un
+    # aislamiento de seguridad: el programa puede leer tus archivos.
+    if [[ ! -d "${pfx}" ]]; then
+      notify "Preparando ${f##*/}" "Primera ejecución: creando su entorno Windows…"
+      "${WINE}" wineboot --init >/dev/null 2>&1 || true
+    fi
+    load_profile "${name}"
+    [[ -n "${P[DLL_OVERRIDES]}" ]] && export WINEDLLOVERRIDES="${P[DLL_OVERRIDES]}"
+    [[ -n "${P[DXVK_HUD]}" ]] && export DXVK_HUD="${P[DXVK_HUD]}"
+    run=()
+    [[ "${P[WAYLAND]}" == 1 ]] && run+=(env -u DISPLAY)          # driver Wayland de Wine
+    [[ "${P[GPU]}" == nvidia ]] && command -v novora-gpu >/dev/null && run+=(novora-gpu usar-nvidia)
+    [[ "${P[GAMEMODE]}" == 1 ]] && command -v gamemoderun >/dev/null && run+=(gamemoderun)
+    cd -- "$(dirname -- "${f}")"
+    if is_msi "${f}"; then exec "${run[@]}" "${WINE}" msiexec /i "${f}" "$@"; fi
+    exec "${run[@]}" "${WINE}" "${f}" "$@"
+    ;;
+  optimizar)
+    [[ $# -eq 1 ]] || die "uso: novora-win optimizar NOMBRE"
+    name="$1"; pfx="$(prefix_of "${name}")"
+    command -v "${WINE}" >/dev/null || die "Wine no está instalado."
+    export WINEPREFIX="${pfx}" WINEDEBUG=-all
+    [[ -d "${pfx}" ]] || "${WINE}" wineboot --init >/dev/null 2>&1 || true
+    sys64="${pfx}/drive_c/windows/system32"; sys32="${pfx}/drive_c/windows/syswow64"
+    mkdir -p "${sys64}" "${sys32}"
+    done_any=0
+    install_dlls() {  # $1 dir paquete, $2 subdir 64, $3 subdir 32, resto: dlls
+      local pkg="$1" d64="$2" d32="$3"; shift 3
+      [[ -d "${pkg}/${d64}" ]] || return 1
+      local dll
+      for dll in "$@"; do
+        [[ -f "${pkg}/${d64}/${dll}.dll" ]] || continue
+        cp -f -- "${pkg}/${d64}/${dll}.dll" "${sys64}/"
+        [[ -f "${pkg}/${d32}/${dll}.dll" ]] && cp -f -- "${pkg}/${d32}/${dll}.dll" "${sys32}/"
+        "${WINE}" reg add 'HKEY_CURRENT_USER\Software\Wine\DllOverrides' /v "${dll}" /d native /f >/dev/null 2>&1
+      done
+    }
+    if install_dlls "${SHARE}/dxvk" x64 x32 d3d8 d3d9 d3d10core d3d11 dxgi; then
+      echo "DXVK (DirectX 9-11 → Vulkan): instalado"; done_any=1
+    else echo "DXVK no está en ${SHARE}/dxvk (ISO construida sin él)"; fi
+    if install_dlls "${SHARE}/vkd3d-proton" x64 x86 d3d12 d3d12core; then
+      echo "VKD3D-Proton (DirectX 12 → Vulkan): instalado"; done_any=1
+    else echo "VKD3D-Proton no está en ${SHARE}/vkd3d-proton"; fi
+    load_profile "${name}"
+    if command -v gamemoderun >/dev/null; then P[GAMEMODE]=1; echo "GameMode: activado"; fi
+    if has_nvidia; then P[GPU]=nvidia; echo "GPU dedicada NVIDIA: activada"; fi
+    save_profile "${name}"
+    [[ "${done_any}" -eq 1 ]] || echo "AVISO: no se instalaron capas DirectX."
+    echo "Perfil guardado: ${PROFILES}/${name}.conf"
+    ;;
+  perfil)
+    [[ $# -ge 1 ]] || die "uso: novora-win perfil NOMBRE [CLAVE=VALOR...]"
+    name="$1"; shift; check_name "${name}"
+    load_profile "${name}"
+    if [[ $# -gt 0 ]]; then for kv in "$@"; do set_kv "${kv}"; done; save_profile "${name}"; fi
+    for k in ${PROFILE_KEYS}; do printf '%s=%s\n' "${k}" "${P[${k}]}"; done
+    ;;
+  apps)
+    shopt -s nullglob
+    for d in "${BASE}"/*/; do d="${d%/}"; printf '%s\t%s\n' "${d##*/}" "$(du -sh -- "${d}" 2>/dev/null | cut -f1)"; done
+    ;;
+  dotnet)
+    [[ $# -eq 1 ]] || die "uso: novora-win dotnet NOMBRE"
+    command -v winetricks >/dev/null || die "winetricks no está instalado."
+    export WINEPREFIX; WINEPREFIX="$(prefix_of "$1")"
+    [[ -d "${WINEPREFIX}" ]] || "${WINE}" wineboot --init >/dev/null 2>&1 || true
+    exec winetricks -q dotnetdesktop8
+    ;;
+  config)
+    [[ $# -eq 1 ]] || die "uso: novora-win config NOMBRE"
+    WINEPREFIX="$(prefix_of "$1")" exec "${WINE}" winecfg
+    ;;
+  borrar)
+    [[ $# -eq 1 ]] || die "uso: novora-win borrar NOMBRE"
+    pfx="$(prefix_of "$1")"; [[ -d "${pfx}" ]] || die "no existe el prefijo $1"
+    read -r -p "¿Borrar el entorno Windows '$1' y todo lo instalado en él? escribe 'si': " a
+    [[ "${a}" == "si" ]] || { echo "Cancelado."; exit 1; }
+    rm -rf -- "${pfx}" "${PROFILES:?}/$1.conf"; echo "Borrado."
+    ;;
+  estado)
+    if command -v "${WINE}" >/dev/null; then echo "Wine: $("${WINE}" --version 2>/dev/null || echo '?')"; else echo "Wine: NO instalado"; fi
+    if [[ -e /dev/ntsync ]]; then echo "NTSync: disponible (sincronización rápida)"; else echo "NTSync: no (requiere kernel 6.14+)"; fi
+    for c in dxvk vkd3d-proton; do
+      if [[ -d "${SHARE}/${c}" ]]; then echo "${c}: incluido"; else echo "${c}: no incluido"; fi
+    done
+    if command -v gamemoderun >/dev/null; then echo "GameMode: sí"; else echo "GameMode: no"; fi
+    if command -v winetricks >/dev/null; then echo "winetricks: sí"; else echo "winetricks: no"; fi
+    echo "Prefijos en: ${BASE}"
+    ;;
+  -h|--help|ayuda) sed -n '2,18p' "$0" ;;
+  *) die "orden desconocida: ${cmd} (usa: novora-win ayuda)" ;;
+esac

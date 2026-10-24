@@ -1,0 +1,25 @@
+#!/bin/sh
+# NOVORA OS — instantánea con Timeshift antes de cambios de apt (opcional).
+# Nunca bloquea apt: si falla, lo registra y apt continúa.
+FLAG="${NOVORA_SNAP_FLAG:-/etc/novora/instantaneas-antes-de-actualizar}"
+STAMP="${NOVORA_SNAP_STAMP:-/var/lib/novora/ultima-instantanea}"
+SNAPLOG="${NOVORA_SNAP_LOG:-/var/log/novora-instantaneas.log}"
+TIMESHIFT="${NOVORA_TIMESHIFT:-timeshift}"
+CMDLINE="${NOVORA_CMDLINE:-/proc/cmdline}"
+[ -f "$FLAG" ] || exit 0
+case " $(cat "$CMDLINE" 2>/dev/null) " in *" boot=live "*) exit 0 ;; esac
+command -v "$TIMESHIFT" >/dev/null 2>&1 || exit 0
+now=$(date +%s)
+last=$(cat "$STAMP" 2>/dev/null || echo 0)
+# Como máximo una instantánea por hora (apt puede invocar dpkg varias veces).
+[ $((now - last)) -lt 3600 ] && exit 0
+mkdir -p "$(dirname "$STAMP")"
+echo "$now" > "$STAMP"
+echo "$(date -u +%FT%TZ) creando instantánea antes de apt" >> "$SNAPLOG"
+if timeout 1800 "$TIMESHIFT" --create --scripted --tags D \
+     --comments "NOVORA: antes de actualizar" >> "$SNAPLOG" 2>&1; then
+  echo "NOVORA: instantánea creada (puedes volver atrás con Timeshift)."
+else
+  echo "NOVORA AVISO: no se pudo crear la instantánea; la actualización continúa." >&2
+fi
+exit 0

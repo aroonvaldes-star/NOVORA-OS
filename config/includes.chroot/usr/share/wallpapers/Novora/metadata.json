@@ -1,0 +1,8 @@
+{
+  "KPlugin": {
+    "Authors": [{ "Name": "NOVORA OS" }],
+    "Id": "Novora",
+    "License": "CC-BY-SA-4.0",
+    "Name": "NOVORA"
+  }
+}

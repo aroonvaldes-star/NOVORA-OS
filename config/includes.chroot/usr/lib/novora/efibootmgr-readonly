@@ -1,0 +1,17 @@
+#!/bin/sh
+# NOVORA OS — efibootmgr de solo lectura para Calamares.
+# Permite listar (sin argumentos o -v); cualquier otra orden, que podría crear,
+# borrar o reordenar entradas NVRAM o escribir firmas en el MBR (-w), se
+# rechaza sin ejecutarse. Devuelve 0 porque Calamares ignora el código en
+# esas llamadas; queda registro en el log.
+REAL="${NOVORA_REAL_EFIBOOTMGR:-/usr/bin/efibootmgr}"
+LOG="${NOVORA_EFI_LOG:-/var/log/novora-efibootmgr-blocked.log}"
+for a in "$@"; do
+  case "$a" in
+    -v|--verbose) ;;
+    *) printf '%s bloqueado: efibootmgr %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG" 2>/dev/null
+       echo "NOVORA: modificación de NVRAM EFI bloqueada (efibootmgr $*)" >&2
+       exit 0 ;;
+  esac
+done
+exec "$REAL" "$@"

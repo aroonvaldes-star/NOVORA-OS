@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=NOVORA: modo claro
+Exec=novora-apariencia claro
+Icon=weather-clear
+NoDisplay=false
+Categories=Settings;

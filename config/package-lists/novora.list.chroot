@@ -1,8 +1,15 @@
-# Base para el entorno Live e instalable NOVORA OS 0.1
+# NOVORA OS 0.1.1 — entorno Live e instalable (Debian 13 "trixie", amd64)
+# Cada nombre debe existir en trixie: `lb build` falla si alguno no existe
+# (prueba T01). Marcados [VERIFICAR] los añadidos en 0.1.1 sin comprobar aún
+# contra el repositorio (deb.debian.org no era accesible desde la auditoría).
+
+# Base Live
 linux-image-amd64
 live-boot
 live-config
 live-config-systemd
+
+# Escritorio
 kde-plasma-desktop
 sddm
 plasma-nm
@@ -18,20 +25,111 @@ flatpak
 pipewire
 pipewire-pulse
 wireplumber
-wine
-wine64
+
+# Firmware (área non-free-firmware) [VERIFICAR]
+firmware-linux
+firmware-iwlwifi
+firmware-realtek
+firmware-sof-signed
+
+# Windows: Wine 11 (WineHQ) o Wine 10 (Debian) lo instala el hook 9300
+gpg
+cabextract
+zstd
+gamemode
+
+# Desarrollo
 git
 curl
 wget
 build-essential
 python3
 python3-pip
+python3-venv
 nodejs
 npm
+
+# Instalador y arranque UEFI (Secure Boot con shim firmado) [VERIFICAR]
 calamares
 calamares-settings-debian
+grub-efi-amd64
+grub-efi-amd64-signed
+shim-signed
+efibootmgr
+
+# Diagnóstico de discos SOLO LECTURA (SMART, USB) [VERIFICAR]
+smartmontools
+usbutils
+pciutils
+
+# Utilidades de disco (en Live quedan bloqueadas por el guardián)
 parted
 gparted
 dosfstools
 e2fsprogs
 ntfs-3g
+
+# ATLAS (asistente local). El motor llama.cpp lo instala el hook 9100.
+tesseract-ocr
+tesseract-ocr-spa
+tesseract-ocr-eng
+# Navegador ligero Qt para el panel local de ATLAS [VERIFICAR]
+falkon
+# ATLAS: leer PDF para la memoria, voz local del resumen y notificaciones de rutinas
+poppler-utils
+espeak-ng
+libnotify-bin
+
+# Desarrollo de NOVORA-LINK y LINK CONTROL (el SDK de .NET lo instala el hook 9200)
+# Android: adb/fastboot, espejo y control del teléfono, reglas USB, JDK [VERIFICAR]
+adb
+fastboot
+scrcpy
+android-sdk-platform-tools-common
+openjdk-21-jdk-headless
+# Multimedia y compilación nativa
+ffmpeg
+cmake
+ninja-build
+pkg-config
+zip
+unzip
+
+# Gráficos para Intel, AMD y NVIDIA con drivers abiertos (Mesa: iris, radeonsi,
+# nouveau/NVK), Vulkan y video por hardware. El driver propietario de NVIDIA
+# se instala después con `novora-gpu nvidia instalar` [VERIFICAR nombres]
+mesa-vulkan-drivers
+mesa-va-drivers
+mesa-utils
+vulkan-tools
+vainfo
+intel-media-va-driver
+firmware-amd-graphics
+firmware-misc-nonfree
+nvtop
+mokutil
+
+# Seguridad: antivirus bajo demanda, cortafuegos con módulo de Plasma, AppArmor [VERIFICAR]
+clamav
+clamav-freshclam
+firewalld
+plasma-firewall
+apparmor
+
+# Actualizaciones: seguridad automática e instantáneas opcionales [VERIFICAR]
+unattended-upgrades
+timeshift
+
+# Apariencia NOVORA: fuentes e iconos (tema propio en includes.chroot) [VERIFICAR]
+fonts-inter
+fonts-jetbrains-mono
+papirus-icon-theme
+
+# Ofimática: LibreOffice en español con integración Qt/KDE [VERIFICAR]
+libreoffice-writer
+libreoffice-calc
+libreoffice-impress
+libreoffice-qt6
+libreoffice-l10n-es
+libreoffice-help-es
+hunspell-es

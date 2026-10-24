@@ -1,0 +1,65 @@
+#!/bin/sh
+# NOVORA OS 0.1.1 — endurecimiento aplicado dentro del chroot durante lb build.
+# Fail-closed: si un archivo esperado no existe, la construcción FALLA, en vez
+# de producir una ISO con un instalador sin proteger.
+set -eu
+
+chmod 0755 /usr/local/bin/novora-storage-audit /usr/local/sbin/novora-disk-guard \
+  /usr/local/sbin/novora-install /usr/lib/novora/novora-udev-ro \
+  /usr/lib/novora/grub-install-guarded /usr/lib/novora/efibootmgr-readonly
+
+# 1) Bloqueo de discos al arrancar la sesión Live (la unidad comprueba boot=live).
+systemctl enable novora-live-lockdown.service
+
+# 2) Calamares: GRUB sin NVRAM y efibootmgr de solo lectura.
+BL=/etc/calamares/modules/bootloader.conf
+if [ ! -f "$BL" ]; then
+  echo "NOVORA: falta $BL (¿cambió calamares-settings-debian?). Abortando." >&2
+  exit 1
+fi
+cp -a "$BL" "$BL.debian-original"
+for key in efiBootLoader grubInstall efiBootMgr installEFIFallback installHybridGRUB; do
+  sed -i "/^[[:space:]]*${key}:/d" "$BL"
+done
+cat >>"$BL" <<'EOF'
+# --- NOVORA OS 0.1.1 (hook 9000-novora-hardening) ---
+efiBootLoader: "grub"
+grubInstall: "/usr/lib/novora/grub-install-guarded"
+efiBootMgr: "/usr/lib/novora/efibootmgr-readonly"
+installEFIFallback: false
+installHybridGRUB: false
+EOF
+grep -q '^grubInstall: "/usr/lib/novora/grub-install-guarded"' "$BL"
+
+# 2b) Aviso en build.log si otro componente de Calamares/Debian llama a
+#     grub-install o efibootmgr sin pasar por los envoltorios (revisar en T04).
+for f in /etc/calamares/settings.conf /etc/calamares/modules/*.conf \
+         /usr/sbin/bootloader-config /usr/bin/install-debian; do
+  [ -f "$f" ] || continue
+  case "$f" in *.debian-original) continue ;; esac
+  if grep -nE 'grub-install|efibootmgr' "$f" | grep -vE '^[0-9]+:[[:space:]]*#' \
+       | grep -v novora >/dev/null; then
+    echo "NOVORA AVISO: $f invoca grub-install/efibootmgr fuera del envoltorio"
+  fi
+done
+
+# 3) Sistema instalado: las actualizaciones de GRUB no tocan la NVRAM y
+#    mantienen la ruta EFI extraíble (claves debconf de grub-efi-amd64).
+cat <<'EOF' | debconf-set-selections
+grub-efi-amd64 grub2/update_nvram boolean false
+grub-efi-amd64 grub2/force_efi_extra_removable boolean true
+EOF
+
+# 4) Ocultar lanzadores de Calamares sin guardián ("Install Debian").
+for f in /usr/share/applications/*.desktop /etc/skel/Desktop/*.desktop; do
+  [ -f "$f" ] || continue
+  case "$(basename "$f")" in novora-*) continue ;; esac
+  if grep -Eq '^Exec=.*(calamares|install-debian)' "$f"; then
+    if [ -L "$f" ] || [ "${f#/etc/skel/}" != "$f" ]; then
+      rm -f "$f"
+    else
+      sed -i '/^NoDisplay=/d; /^\[Desktop Entry\]/a NoDisplay=true' "$f"
+    fi
+    echo "NOVORA: lanzador oculto: $f"
+  fi
+done

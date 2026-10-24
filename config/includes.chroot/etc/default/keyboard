@@ -1,0 +1,6 @@
+# NOVORA OS: teclado Español (Latinoamericano), distribución usada en México.
+XKBMODEL="pc105"
+XKBLAYOUT="latam"
+XKBVARIANT=""
+XKBOPTIONS=""
+BACKSPACE="guess"

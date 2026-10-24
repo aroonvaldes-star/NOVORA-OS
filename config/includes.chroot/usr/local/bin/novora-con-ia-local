@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# NOVORA OS — ejecuta un programa con el motor de IA local de ATLAS disponible
+# en http://127.0.0.1:8181/v1 (API compatible con OpenAI, sin internet).
+# Si el motor no estaba en marcha, lo arranca y lo detiene al cerrar el programa,
+# para no dejar ocupada la memoria de la GPU.
+set -Euo pipefail
+[[ $# -ge 1 ]] || { echo "uso: novora-con-ia-local PROGRAMA [argumentos]" >&2; exit 1; }
+ATLAS="${NOVORA_ATLAS_BIN:-novora-atlas}"
+started=0
+if ! "${ATLAS}" motor estado 2>/dev/null | grep -q "activo"; then
+  if "${ATLAS}" motor iniciar >/dev/null 2>&1; then started=1
+  else echo "AVISO: no se pudo iniciar la IA local (¿modelo instalado? atlas modelo listar)" >&2; fi
+fi
+"$@"; rc=$?
+if [[ "${started}" -eq 1 ]]; then "${ATLAS}" motor detener >/dev/null 2>&1 || true; fi
+exit "${rc}"

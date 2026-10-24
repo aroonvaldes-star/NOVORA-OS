@@ -1,0 +1,3 @@
+#!/bin/sh
+# ATLAS — orden corta del asistente local de NOVORA OS (equivale a novora-atlas).
+exec /usr/local/bin/novora-atlas "$@"

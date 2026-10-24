@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=NOVORA: modo oscuro
+Exec=novora-apariencia oscuro
+Icon=weather-clear-night
+NoDisplay=false
+Categories=Settings;

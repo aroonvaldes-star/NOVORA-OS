@@ -2,7 +2,7 @@
 Type=Application
 Name=NOVORA OS - Auditoría de discos
 Comment=Identificar particiones antes de instalar (solo lectura)
-Exec=konsole -e novora-storage-audit --interactive
+Exec=konsole --hold -e novora-storage-audit --interactive
 Terminal=false
 Icon=drive-harddisk
 Categories=System;

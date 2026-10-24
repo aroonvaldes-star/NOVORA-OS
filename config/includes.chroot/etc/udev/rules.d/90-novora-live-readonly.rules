@@ -1,0 +1,9 @@
+# NOVORA OS Live: todo disco o partición que aparece queda en SOLO LECTURA
+# salvo el destino autorizado por novora-disk-guard. Solo actúa con boot=live
+# (el propio script lo comprueba); en el sistema instalado no hace nada.
+ACTION!="add|change", GOTO="novora_ro_end"
+SUBSYSTEM!="block", GOTO="novora_ro_end"
+ENV{DEVTYPE}!="disk|partition", GOTO="novora_ro_end"
+KERNEL=="loop*|ram*|zram*|sr*|dm-*|md*|nbd*", GOTO="novora_ro_end"
+RUN+="/usr/lib/novora/novora-udev-ro"
+LABEL="novora_ro_end"

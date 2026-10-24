@@ -1,0 +1,4 @@
+// NOVORA OS: listas de paquetes y parches de SEGURIDAD automáticos (diarios).
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";

@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""NOVORA OS — guardián de discos para la sesión Live (requiere root).
+
+Mecanismo: indicador de solo-lectura del kernel (BLKROSET, `blockdev --setro`).
+Evidencia (kernel 6.18, discos loop desechables, ver AUDITORIA-CLAUDE.md §6):
+  * RO sobre el disco completo bloquea escrituras en el disco y en TODAS sus
+    particiones, también tras releer la tabla de particiones.
+  * RO por partición se PIERDE si la tabla se relee con el disco en RW.
+  * Un sistema de archivos montado en RW ANTES del bloqueo sigue escribiendo.
+    Por eso `lockdown` se ejecuta al arrancar, antes de udisks, y aborta si
+    encuentra montajes RW en discos protegidos.
+
+Subcomandos:
+  status                         muestra el estado RO de cada disco/partición
+  lockdown                       todos los discos en RO + efivarfs en RO
+  unlock --allowlist F [--apply] desbloquea SOLO el disco autorizado (por
+                                 identidad), con hermanas en RO. Sin --apply
+                                 solo muestra el plan.
+  verify --allowlist F           comprueba que el estado actual es el esperado
+Códigos: 0 ok, 1 uso, 4 no seguro/estado inesperado, 5 verificación fallida.
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.environ.get("NOVORA_LIB", "/usr/lib/novora"))
+import novora_storage as ns  # noqa: E402
+
+STATE_DIR = os.environ.get("NOVORA_STATE_DIR", "/run/novora")
+UNLOCK_ENV = os.path.join(STATE_DIR, "unlocked.env")
+EFIVARS = "/sys/firmware/efi/efivars"
+
+
+def ro_flag(path):
+    name = os.path.basename(path)
+    try:
+        with open(f"/sys/class/block/{name}/ro", encoding="ascii") as fh:
+            return fh.read().strip() == "1"
+    except OSError:
+        return None
+
+
+def set_ro(path, ro):
+    subprocess.run(["blockdev", "--setro" if ro else "--setrw", path],
+                   check=True)
+
+
+def protected_nodes(disk):
+    """Disco y particiones (los nodos que el kernel deja marcar RO)."""
+    return [disk.get("path")] + [p.get("path") for p in ns.partitions(disk)]
+
+
+def rw_mounts(disk):
+    bad = []
+    with open("/proc/self/mounts", encoding="utf-8") as fh:
+        mounts = [ln.split() for ln in fh]
+    paths = {n.get("path") for n in ns.walk(disk)}
+    for src, mnt, _fs, opts, *_ in mounts:
+        if src in paths and "rw" in opts.split(","):
+            bad.append((src, mnt))
+    return bad
+
+
+def efivars_ro():
+    if not os.path.ismount(EFIVARS):
+        return True
+    r = subprocess.run(["mount", "-o", "remount,ro", EFIVARS])
+    return r.returncode == 0
+
+
+def cmd_status(tree):
+    for d in ns.disks(tree):
+        print(f"{d.get('path')}: ro={ro_flag(d.get('path'))} "
+              f"({d.get('model') or '?'}, {ns.human(d.get('size'))})")
+        for p in ns.partitions(d):
+            print(f"  {p.get('path')}: ro={ro_flag(p.get('path'))}")
+    return 0
+
+
+SYSFS_BLOCK = os.environ.get("NOVORA_SYSFS_BLOCK", "/sys/class/block")
+SKIP_PREFIXES = ("loop", "ram", "zram", "sr", "dm-", "md", "nbd", "fd")
+
+
+def sysfs_nodes():
+    """Enumeración independiente de lsblk: todo disco/partición del kernel.
+    NOVORA_TEST_NO_SYSFS=1 solo para pruebas en contenedores (no bloquear
+    el disco del propio anfitrión de pruebas)."""
+    if os.environ.get("NOVORA_TEST_NO_SYSFS") == "1":
+        return []
+    try:
+        names = sorted(os.listdir(SYSFS_BLOCK))
+    except OSError:
+        return []
+    return ["/dev/" + n for n in names if not n.startswith(SKIP_PREFIXES)]
+
+
+def cmd_lockdown(tree):
+    rc = 0
+    listed = {n for d in ns.disks(tree) for n in protected_nodes(d)}
+    for node in sorted(set(sysfs_nodes()) - listed):
+        try:
+            set_ro(node, True)
+        except (OSError, subprocess.CalledProcessError):
+            print(f"NO SEGURO: no se pudo bloquear {node}", file=sys.stderr)
+            rc = 4
+    for d in ns.disks(tree):
+        for node in protected_nodes(d):
+            set_ro(node, True)
+        bad = rw_mounts(d)
+        if bad:
+            print(f"NO SEGURO: {d.get('path')} tenía montajes RW antes del "
+                  f"bloqueo y pueden seguir escribiendo: {bad}", file=sys.stderr)
+            rc = 4
+    if not efivars_ro():
+        print("NO SEGURO: no se pudo remontar efivarfs en solo-lectura.",
+              file=sys.stderr)
+        rc = 4
+    try:
+        os.remove(UNLOCK_ENV)
+    except FileNotFoundError:
+        pass
+    print("Bloqueo aplicado." if rc == 0 else "Bloqueo aplicado con fallos.")
+    return rc
+
+
+def plan_unlock(tree, allow):
+    disk = ns.resolve_allowlisted_disk(tree, allow)
+    allowed = {allow["target"]["partuuid"]}
+    if allow.get("esp"):
+        allowed.add(allow["esp"]["partuuid"])
+    rw, ro = [disk.get("path")], []
+    for p in ns.partitions(disk):
+        (rw if (p.get("partuuid") or "").lower() in allowed else ro).append(p.get("path"))
+    others = [n for d in ns.disks(tree) if d is not disk for n in protected_nodes(d)]
+    return disk, rw, ro, others, allowed
+
+
+def cmd_unlock(tree, allow, apply):
+    try:
+        disk, rw, ro, others, allowed = plan_unlock(tree, allow)
+    except ns.StorageError as ex:
+        print(f"CANCELADO (fail-closed): {ex}", file=sys.stderr)
+        return 4
+    for p in ns.partitions(disk):
+        if (p.get("partuuid") or "").lower() in allowed and ns.mounted_anywhere(p):
+            print(f"CANCELADO: {p.get('path')} está montada.", file=sys.stderr)
+            return 4
+    print(f"Plan: RW {rw}\n      RO (mismo disco) {ro}\n      RO (otros) {others}")
+    if not apply:
+        print("Simulación: no se cambió nada. Usa --apply.")
+        return 0
+    for n in others + ro:
+        set_ro(n, True)
+    set_ro(disk.get("path"), False)
+    for n in rw[1:]:
+        set_ro(n, False)
+    for n in ro:            # tras poner el disco en RW, re-asegurar hermanas
+        set_ro(n, True)
+    if not efivars_ro():
+        print("NO SEGURO: efivarfs sigue en RW.", file=sys.stderr)
+        return 4
+    i = ns.identity(disk)
+    safe = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-")
+    for value in (i["serial"] or "", i["wwn"] or "", *allowed):
+        if not set(value) <= safe:
+            print("CANCELADO: identificador con caracteres inesperados.",
+                  file=sys.stderr)
+            cmd_lockdown(ns.load_tree())
+            return 4
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    with open(UNLOCK_ENV, "w", encoding="utf-8") as fh:
+        fh.write(f"NOVORA_UNLOCK_SERIAL='{i['serial'] or ''}'\n"
+                 f"NOVORA_UNLOCK_WWN='{i['wwn'] or ''}'\n"
+                 f"NOVORA_ALLOWED_PARTUUIDS='{' '.join(sorted(allowed))}'\n")
+    return cmd_verify(ns.load_tree(), allow)
+
+
+def cmd_verify(tree, allow):
+    try:
+        disk, rw, ro, others, _ = plan_unlock(tree, allow)
+    except ns.StorageError as ex:
+        print(f"VERIFICACIÓN FALLIDA: {ex}", file=sys.stderr)
+        return 5
+    errors = [n for n in others + ro if ro_flag(n) is not True]
+    errors += [n for n in rw if ro_flag(n) is not False]
+    if errors:
+        print(f"VERIFICACIÓN FALLIDA: estado RO inesperado en {errors}",
+              file=sys.stderr)
+        return 5
+    print("Verificación correcta: solo el destino autorizado es escribible.")
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("command", choices=["status", "lockdown", "unlock", "verify"])
+    ap.add_argument("--allowlist")
+    ap.add_argument("--apply", action="store_true")
+    args = ap.parse_args(argv)
+    if os.geteuid() != 0 and args.command != "status":
+        print("Requiere root.", file=sys.stderr)
+        return 1
+    try:
+        tree = ns.load_tree()
+    except ns.StorageError as ex:
+        print(ex, file=sys.stderr)
+        return 4
+    if args.command == "status":
+        return cmd_status(tree)
+    if args.command == "lockdown":
+        return cmd_lockdown(tree)
+    if not args.allowlist:
+        print("Falta --allowlist", file=sys.stderr)
+        return 1
+    allow = ns.load_allowlist(args.allowlist)
+    if args.command == "unlock":
+        return cmd_unlock(tree, allow, args.apply)
+    return cmd_verify(tree, allow)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

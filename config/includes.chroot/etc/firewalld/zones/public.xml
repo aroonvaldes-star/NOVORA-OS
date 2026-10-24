@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<zone>
+  <short>Public</short>
+  <description>NOVORA OS: bloquea todas las conexiones entrantes no solicitadas. Las salientes (navegar, actualizar, adb) funcionan. Para recibir NOVORA-LINK por Wi-Fi, abre su puerto en Configuración del sistema → Cortafuegos.</description>
+  <service name="dhcpv6-client"/>
+</zone>

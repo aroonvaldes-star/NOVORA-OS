@@ -1,0 +1,12 @@
+ATLAS — modelos locales (formato GGUF)
+
+Coloca aquí (durante la construcción, con scripts/add-atlas-model.sh) o en
+~/.local/share/novora-atlas/models (con "atlas modelo instalar") un
+modelo .gguf. Para ver la pantalla con visión además de OCR, añade también
+su proyector multimodal (archivo cuyo nombre contenga "mmproj").
+
+Orientación para GPU de 4 GB (verificar en tu equipo):
+  - general/organizar: modelos de 3-4B en Q4_K_M (~2-2,5 GB)
+  - programar: modelos de código de 3-4B en Q4_K_M
+  - visión: modelos multimodales pequeños (~2B) + su mmproj
+Comprueba la licencia de cada modelo antes de redistribuirlo en la ISO.

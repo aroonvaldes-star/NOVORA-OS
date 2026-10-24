@@ -1,0 +1,4 @@
+Origen: https://github.com/addyosmani/agent-skills
+Commit revisado: aeac41d4d005999432bb7312f7ff06383a91d59d (2026-10-13)
+Licencia: MIT (ver LICENSE). Incluidas: skills/ (25) y references/ (enlazadas por las skills).
+No incluido: agents/, commands/, hooks/, evals/ (específicos de otros clientes).

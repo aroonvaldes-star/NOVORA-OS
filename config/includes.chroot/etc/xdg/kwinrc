@@ -1,0 +1,12 @@
+[org.kde.kdecoration2]
+library=org.kde.breeze
+theme=Breeze
+# Botones de ventana a la izquierda: cerrar, minimizar, maximizar.
+ButtonsOnLeft=XIA
+ButtonsOnRight=
+
+[Plugins]
+blurEnabled=true
+contrastEnabled=true
+magiclampEnabled=true
+squashEnabled=false

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ATLAS: analizar pantalla
+Comment=Captura la pantalla actual y la explica (sin internet)
+Exec=novora-atlas pantalla --panel
+Icon=preview
+Terminal=false
+NoDisplay=true
+Categories=Utility;
+X-KDE-Shortcuts=Meta+Shift+X

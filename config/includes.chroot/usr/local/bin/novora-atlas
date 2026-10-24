@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""ATLAS — asistente local sin internet. Ver: novora-atlas --help"""
+import os
+import sys
+
+_lib = os.environ.get("NOVORA_ATLAS_LIB", "/usr/lib/novora/atlas")
+sys.path.insert(0, os.path.join(_lib, "vendor"))   # Office Oxide (hook 9100)
+sys.path.insert(0, _lib)
+from novora_atlas.cli import main  # noqa: E402
+
+sys.exit(main())

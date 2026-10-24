@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Catálogo de apps NOVORA
+Comment=GenOffice, Spotifast, Zuno, Huntly y asistentes de IA en la nube (opcionales)
+Exec=konsole --hold -e novora-apps lista
+Icon=system-software-install
+Terminal=false
+Categories=System;

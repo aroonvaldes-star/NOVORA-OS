@@ -1,0 +1,41 @@
+#!/bin/sh
+# shellcheck disable=SC1091  # build.conf lo genera build-iso.sh
+# NOVORA OS — entorno de desarrollo para NOVORA-LINK (.NET) y LINK CONTROL
+# (Android). Instala .NET SDK 8 y 10 desde el repositorio oficial de Microsoft
+# para Debian 13 (https://learn.microsoft.com/dotnet/core/install/linux-debian).
+# Si falla, la ISO se construye igual y `novora-dev estado` lo indicará;
+# NOVORA_DEV_DOTNET=required en build.conf hace que la construcción falle.
+set -eu
+chmod 0755 /usr/local/bin/novora-dev /usr/local/bin/novora-gpu
+REQUIRED=optional
+[ -f /etc/novora-atlas/build.conf ] && . /etc/novora-atlas/build.conf
+REQUIRED="${NOVORA_DEV_DOTNET:-$REQUIRED}"
+
+# Privacidad: sin telemetría del SDK de .NET para todos los usuarios.
+cat >/etc/profile.d/novora-dotnet.sh <<'ENV'
+export DOTNET_CLI_TELEMETRY_OPTOUT=1
+export DOTNET_NOLOGO=1
+ENV
+grep -q DOTNET_CLI_TELEMETRY_OPTOUT /etc/environment 2>/dev/null \
+  || printf 'DOTNET_CLI_TELEMETRY_OPTOUT=1\nDOTNET_NOLOGO=1\n' >>/etc/environment
+
+ok=0
+tmp=$(mktemp -d)
+if wget -q -O "$tmp/ms.deb" https://packages.microsoft.com/config/debian/13/packages-microsoft-prod.deb \
+   && dpkg -i "$tmp/ms.deb" && apt-get update; then
+  if apt-get install -y --no-install-recommends dotnet-sdk-8.0 dotnet-sdk-10.0; then
+    ok=1
+  fi
+fi
+rm -rf "$tmp"
+if [ "$ok" -eq 1 ]; then
+  echo "NOVORA DEV: SDKs .NET instalados:"
+  dotnet --list-sdks || true
+else
+  echo "NOVORA AVISO: no se pudo instalar .NET SDK desde packages.microsoft.com."
+  [ "$REQUIRED" = "required" ] && exit 1
+fi
+# Plantillas de udev para teléfonos Android (paquete android-sdk-platform-tools-common).
+if [ -d /lib/udev/rules.d ] && ls /lib/udev/rules.d/*android* >/dev/null 2>&1; then
+  echo "NOVORA DEV: reglas udev de Android presentes."
+fi

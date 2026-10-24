@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Instalar NOVORA OS (solo VM en 0.1.1)
+Comment=Instalador con bloqueo de discos no autorizados
+Exec=konsole --hold -e pkexec /usr/local/sbin/novora-install
+Terminal=false
+Icon=system-software-install
+Categories=System;
