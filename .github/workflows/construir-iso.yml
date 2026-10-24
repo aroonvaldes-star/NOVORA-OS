@@ -63,14 +63,14 @@ jobs:
         run: |
           set -o pipefail
           sudo docker run --rm --privileged \
-            -v "$GITHUB_WORKSPACE":/src -w /src -e ATLAS_FLAG \
+            -v "$GITHUB_WORKSPACE":/src -w /src -e "ATLAS_FLAG=${ATLAS_FLAG:-}" \
             debian:trixie bash -euo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -q
               apt-get install -y -q --no-install-recommends \
                 live-build debootstrap xorriso squashfs-tools ca-certificates git
               git config --global --add safe.directory /src
-              bash scripts/build-iso.sh $ATLAS_FLAG' 2>&1 | tee construccion.log
+              bash scripts/build-iso.sh ${ATLAS_FLAG:-}' 2>&1 | tee construccion.log
 
       - name: Mostrar el error como anotación
         if: failure()
