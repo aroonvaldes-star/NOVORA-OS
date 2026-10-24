@@ -127,8 +127,8 @@ jobs:
               echo "Avisos NOVORA:"; grep -h "NOVORA AVISO" build/build.log | sort -u | head -30 || echo "  ninguno"
               echo "Instalado por los hooks:"; grep -hE "^NOVORA: |ATLAS: " build/build.log | sort -u | head -20 || true
               echo "Versiones:"
-              grep -hE "^(linux-image-[0-9][^ ]*-amd64|plasma-desktop|kwin-wayland|wine|wine64|winehq-stable|wine-stable|llama\.cpp-tools|dotnet-sdk-[0-9.]+|libreoffice-core|calamares|clamav|firefox-esr|scrcpy|mesa-vulkan-drivers|shim-signed|grub-efi-amd64-signed)[[:space:]]" build/*.packages | sort -u | head -40
-              echo "Paquetes en total: $(wc -l < build/*.packages)"
+              grep -hE "^(llama-server|linux-image-[0-9][^ ]*-amd64|plasma-desktop|kwin-wayland|wine|wine64|winehq-stable|wine-stable|llama\.cpp-tools|dotnet-sdk-[0-9.]+|libreoffice-core|calamares|clamav|firefox-esr|scrcpy|mesa-vulkan-drivers|shim-signed|grub-efi-amd64-signed)[[:space:]]" build/*.packages | sort -u | head -40
+              echo "Paquetes en total: $(cat build/*.packages | wc -l)"
             } > iso-resumen.txt
             echo "::notice title=ISO construida::$(enc < iso-resumen.txt)"
           fi

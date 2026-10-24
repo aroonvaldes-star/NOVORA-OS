@@ -35,25 +35,32 @@ else
 fi
 [ "$wine_ok" -eq 1 ] || { echo "NOVORA AVISO: no se pudo instalar Wine."; }
 
-# Descarga la última versión publicada de un proyecto de GitHub (nombre de asset por patrón).
+# Descarga la última versión publicada de un proyecto de GitHub (asset por patrón)
+# y la verifica contra la huella SHA256 que publica GitHub ("digest") si existe.
 fetch_release() {  # $1 repo, $2 regex del asset, $3 destino
-  url=$(wget -q -O- "https://api.github.com/repos/$1/releases/latest" | python3 -c '
+  info=$(wget -q -O- "https://api.github.com/repos/$1/releases/latest" | python3 -c '
 import json, re, sys
 d = json.load(sys.stdin)
 for a in d.get("assets", []):
     if re.search(sys.argv[1], a["name"]):
-        print(d["tag_name"], a["browser_download_url"]); break' "$2") || return 1
-  [ -n "$url" ] || return 1
-  tag=${url%% *}; link=${url#* }
+        dig = (a.get("digest") or "").removeprefix("sha256:") or "-"
+        print(d["tag_name"], dig, a["browser_download_url"]); break' "$2") || return 1
+  [ -n "$info" ] || return 1
+  tag=${info%% *}; rest=${info#* }; want=${rest%% *}; link=${rest#* }
   wget -q -O "$3" "$link" || return 1
-  echo "NOVORA WIN: $1 $tag sha256=$(sha256sum "$3" | cut -d' ' -f1)"
+  got=$(sha256sum "$3" | cut -d' ' -f1)
+  if [ "$want" != "-" ] && [ "$want" != "$got" ]; then
+    echo "NOVORA AVISO: $1 $tag: la huella SHA256 no coincide con la de GitHub; descartado."
+    rm -f "$3"; return 1
+  fi
+  echo "NOVORA: $1 $tag sha256=$got (verificada: $( [ "$want" = "-" ] && echo no-publicada || echo si))"
 }
 tmp=$(mktemp -d)
 if fetch_release doitsujin/dxvk 'dxvk-[0-9.]+\.tar\.gz$' "$tmp/dxvk.tar.gz"; then
   rm -rf "$SHARE/dxvk"; mkdir -p "$SHARE/dxvk"
   tar -xzf "$tmp/dxvk.tar.gz" -C "$SHARE/dxvk" --strip-components=1 --no-same-owner
 else echo "NOVORA AVISO: no se pudo descargar DXVK."; fi
-if fetch_release HansKristian-Arntzen/vkd3d-proton 'vkd3d-proton-[0-9.]+\.tar\.zst$' "$tmp/vkd3d.tar.zst"; then
+if fetch_release HansKristian-Work/vkd3d-proton 'vkd3d-proton-[0-9.]+\.tar\.zst$' "$tmp/vkd3d.tar.zst"; then
   rm -rf "$SHARE/vkd3d-proton"; mkdir -p "$SHARE/vkd3d-proton"
   tar --zstd -xf "$tmp/vkd3d.tar.zst" -C "$SHARE/vkd3d-proton" --strip-components=1 --no-same-owner
 else echo "NOVORA AVISO: no se pudo descargar VKD3D-Proton."; fi

@@ -38,6 +38,81 @@ for pkg in libggml0-backend-vulkan libggml-backend-vulkan; do
     break
   fi
 done
+# Descarga la última versión publicada de un proyecto de GitHub (asset por patrón)
+# y la verifica contra la huella SHA256 que publica GitHub ("digest") si existe.
+fetch_release() {  # $1 repo, $2 regex del asset, $3 destino
+  info=$(wget -q -O- "https://api.github.com/repos/$1/releases/latest" | python3 -c '
+import json, re, sys
+d = json.load(sys.stdin)
+for a in d.get("assets", []):
+    if re.search(sys.argv[1], a["name"]):
+        dig = (a.get("digest") or "").removeprefix("sha256:") or "-"
+        print(d["tag_name"], dig, a["browser_download_url"]); break' "$2") || return 1
+  [ -n "$info" ] || return 1
+  tag=${info%% *}; rest=${info#* }; want=${rest%% *}; link=${rest#* }
+  wget -q -O "$3" "$link" || return 1
+  got=$(sha256sum "$3" | cut -d' ' -f1)
+  if [ "$want" != "-" ] && [ "$want" != "$got" ]; then
+    echo "NOVORA AVISO: $1 $tag: la huella SHA256 no coincide con la de GitHub; descartado."
+    rm -f "$3"; return 1
+  fi
+  echo "NOVORA: $1 $tag sha256=$got (verificada: $( [ "$want" = "-" ] && echo no-publicada || echo si))"
+}
+# Respaldo: binario oficial de llama.cpp (ggml-org) con backend Vulkan, que usa
+# la GPU con Mesa (Intel, AMD, NVK) o con el driver de NVIDIA, y si no hay GPU
+# funciona en CPU. Se instala aparte en /usr/lib/novora/llama.
+if [ "$installed" -ne 1 ]; then
+  echo "ATLAS: llama.cpp-tools no está en Debian; probando el binario oficial de ggml-org/llama.cpp"
+  tmp=$(mktemp -d)
+  if fetch_release ggml-org/llama.cpp 'bin-ubuntu-vulkan-x64\.(zip|tar\.gz)$' "$tmp/llama.pkg"; then
+    apt-get install -y --no-install-recommends libvulkan1 libgomp1 || true
+    LLAMA=/usr/lib/novora/llama
+    rm -rf "$LLAMA"; mkdir -p "$LLAMA"
+    if python3 - "$tmp/llama.pkg" "$LLAMA" <<'PY'
+import os, shutil, sys, tarfile, tempfile, zipfile
+pkg, dest = sys.argv[1], sys.argv[2]
+work = tempfile.mkdtemp()
+if zipfile.is_zipfile(pkg):
+    with zipfile.ZipFile(pkg) as z:
+        for m in z.namelist():                     # sin rutas absolutas ni ".."
+            if m.startswith("/") or ".." in m.split("/"):
+                sys.exit("ruta peligrosa en el paquete: " + m)
+        z.extractall(work)
+else:
+    with tarfile.open(pkg) as t:
+        t.extractall(work, filter="data")
+srv = next((os.path.join(r, "llama-server") for r, _, f in os.walk(work) if "llama-server" in f), None)
+if not srv:
+    sys.exit("el paquete no trae llama-server")
+src = os.path.dirname(srv)
+for name in os.listdir(src):                       # binarios y bibliotecas de esa carpeta
+    p = os.path.join(src, name)
+    if os.path.isfile(p) and not os.path.islink(p) and (name.startswith("llama-") or ".so" in name):
+        shutil.copy2(p, dest)
+    elif os.path.islink(p) and ".so" in name:
+        os.symlink(os.readlink(p), os.path.join(dest, name))
+os.chmod(os.path.join(dest, "llama-server"), 0o755)
+PY
+    then
+      cat >/usr/local/bin/llama-server <<'SH'
+#!/bin/sh
+# NOVORA OS: llama-server oficial (ggml-org) con sus bibliotecas en /usr/lib/novora/llama
+export LD_LIBRARY_PATH="/usr/lib/novora/llama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /usr/lib/novora/llama/llama-server "$@"
+SH
+      chmod 0755 /usr/local/bin/llama-server
+      if /usr/local/bin/llama-server --version >/dev/null 2>&1; then
+        installed=1
+        echo "NOVORA: llama-server oficial instalado (Vulkan)."
+      else
+        echo "NOVORA AVISO: llama-server oficial no arranca; bibliotecas que faltan:"
+        LD_LIBRARY_PATH=/usr/lib/novora/llama ldd /usr/lib/novora/llama/llama-server | grep "not found" || true
+        rm -f /usr/local/bin/llama-server
+      fi
+    fi
+  fi
+  rm -rf "$tmp"
+fi
 if [ "$installed" -ne 1 ]; then
   echo "NOVORA AVISO: no se pudo instalar llama.cpp-tools; ATLAS funcionará sin motor."
   [ "$REQUIRED" = "required" ] && exit 1
