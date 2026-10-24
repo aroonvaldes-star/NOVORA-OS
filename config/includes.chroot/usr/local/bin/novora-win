@@ -65,7 +65,7 @@ set_kv() {  # CLAVE=VALOR validado
   esac
   P[${k}]="${v}"
 }
-has_nvidia() { command -v novora-gpu >/dev/null && novora-gpu estado 2>/dev/null | grep -q '^NVIDIA:'; }
+has_nvidia() { command -v novora-gpu >/dev/null && grep -q '^NVIDIA:' < <(novora-gpu estado 2>/dev/null); }
 
 cmd="${1:-estado}"; shift || true
 case "${cmd}" in

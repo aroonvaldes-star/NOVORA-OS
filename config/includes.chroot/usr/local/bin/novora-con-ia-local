@@ -7,7 +7,7 @@ set -Euo pipefail
 [[ $# -ge 1 ]] || { echo "uso: novora-con-ia-local PROGRAMA [argumentos]" >&2; exit 1; }
 ATLAS="${NOVORA_ATLAS_BIN:-novora-atlas}"
 started=0
-if ! "${ATLAS}" motor estado 2>/dev/null | grep -q "activo"; then
+if ! grep -q "activo" < <("${ATLAS}" motor estado 2>/dev/null); then
   if "${ATLAS}" motor iniciar >/dev/null 2>&1; then started=1
   else echo "AVISO: no se pudo iniciar la IA local (¿modelo instalado? atlas modelo listar)" >&2; fi
 fi

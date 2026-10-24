@@ -99,7 +99,9 @@ case "${cmd}" in
       echo "AVISO: sin --sha256 no se comprueba el archivo; usa el hash publicado en la web oficial."
     fi
     # Seguridad: nada de rutas absolutas ni '..' dentro del archivo.
-    if tar -tzf "${arch}" | grep -qE '(^/|(^|/)\.\.(/|$))'; then die "el archivo contiene rutas peligrosas"; fi
+    # Lista completa primero: con pipefail, «tar | grep -q» podía dar SIGPIPE y dejar pasar un archivo peligroso.
+    listing="$(tar -tzf "${arch}")" || die "no se pudo leer el archivo"
+    if grep -qE '(^/|(^|/)\.\.(/|$))' <<< "${listing}"; then die "el archivo contiene rutas peligrosas"; fi
     dest="${OPT}/${what}"
     [[ ! -e "${dest}" ]] || die "ya existe ${dest}; bórralo primero para reinstalar"
     tmp="$(mktemp -d "${OPT%/}.tmp.XXXXXX" 2>/dev/null || mktemp -d)"
