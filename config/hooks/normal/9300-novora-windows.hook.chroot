@@ -35,25 +35,68 @@ else
 fi
 [ "$wine_ok" -eq 1 ] || { echo "NOVORA AVISO: no se pudo instalar Wine."; }
 
-# Descarga la última versión publicada de un proyecto de GitHub (nombre de asset por patrón).
-fetch_release() {  # $1 repo, $2 regex del asset, $3 destino
-  url=$(wget -q -O- "https://api.github.com/repos/$1/releases/latest" | python3 -c '
+# Descarga la última versión publicada de un proyecto de GitHub (asset por patrón)
+# y la verifica contra la huella SHA256 que publica GitHub ("digest") si existe.
+# Si la API no responde (límite de 60 consultas/hora por IP sin autenticar), usa
+# la redirección pública /releases/latest y el nombre esperado del asset ($4).
+fetch_release() {  # $1 repo, $2 regex del asset, $3 destino, $4 plantilla opcional ({tag})
+  api=$(wget -q -O- "https://api.github.com/repos/$1/releases/latest") || api=""
+  info=""
+  if [ -n "$api" ]; then
+    info=$(printf '%s' "$api" | python3 -c '
 import json, re, sys
 d = json.load(sys.stdin)
+names = [a["name"] for a in d.get("assets", [])]
 for a in d.get("assets", []):
     if re.search(sys.argv[1], a["name"]):
-        print(d["tag_name"], a["browser_download_url"]); break' "$2") || return 1
-  [ -n "$url" ] || return 1
-  tag=${url%% *}; link=${url#* }
-  wget -q -O "$3" "$link" || return 1
-  echo "NOVORA WIN: $1 $tag sha256=$(sha256sum "$3" | cut -d' ' -f1)"
+        dig = (a.get("digest") or "").removeprefix("sha256:") or "-"
+        print(d["tag_name"], dig, a["browser_download_url"]); break
+else:
+    print("SIN-ASSET", d.get("tag_name", "?"), " ".join(names[:40]))' "$2") || info=""
+  fi
+  case "$info" in
+    SIN-ASSET*)
+      # Algunos proyectos marcan como «latest» una publicación sin binarios. Por
+      # ejemplo llama.cpp: «latest» es v0.7.0 (solo nightly-tag.txt) y publica
+      # cada compilación oficial bXXXX con prerelease: true (release-publish.yml).
+      # Se toma la más reciente que trae el archivo, saltando solo borradores.
+      echo "NOVORA: $1: «latest» (${info#SIN-ASSET }) no trae '$2'; busco en las publicaciones recientes"
+      info=$(wget -q -O- "https://api.github.com/repos/$1/releases?per_page=30" | python3 -c '
+import json, re, sys
+for d in json.load(sys.stdin):
+    if d.get("draft"):
+        continue
+    for a in d.get("assets", []):
+        if re.search(sys.argv[1], a["name"]):
+            dig = (a.get("digest") or "").removeprefix("sha256:") or "-"
+            print(d["tag_name"], dig, a["browser_download_url"]); sys.exit()' "$2") || info=""
+      [ -n "$info" ] || { echo "NOVORA AVISO: $1: ninguna publicación reciente trae '$2'"; return 1; }
+      ;;
+  esac
+  if [ -z "$info" ]; then
+    if [ -z "${4:-}" ]; then echo "NOVORA AVISO: $1: la API de GitHub no respondió (¿límite de consultas?)"; return 1; fi
+    loc=$(wget -S --max-redirect=0 -O /dev/null "https://github.com/$1/releases/latest" 2>&1 | sed -n 's/^ *Location: //p' | tail -1)
+    tag=${loc##*/}
+    [ -n "$tag" ] || { echo "NOVORA AVISO: $1: no se pudo averiguar la última versión"; return 1; }
+    name=$(printf '%s' "$4" | sed "s/{tag}/$tag/g")
+    info="$tag - https://github.com/$1/releases/download/$tag/$name"
+    echo "NOVORA: $1: API no disponible; uso la redirección pública ($tag)"
+  fi
+  tag=${info%% *}; rest=${info#* }; want=${rest%% *}; link=${rest#* }
+  wget -q -O "$3" "$link" || { echo "NOVORA AVISO: $1 $tag: falló la descarga de $link"; return 1; }
+  got=$(sha256sum "$3" | cut -d' ' -f1)
+  if [ "$want" != "-" ] && [ "$want" != "$got" ]; then
+    echo "NOVORA AVISO: $1 $tag: la huella SHA256 no coincide con la de GitHub; descartado."
+    rm -f "$3"; return 1
+  fi
+  echo "NOVORA: $1 $tag sha256=$got (huella: $( [ "$want" = "-" ] && echo "NO verificada, GitHub no la dio" || echo "verificada con GitHub"))"
 }
 tmp=$(mktemp -d)
 if fetch_release doitsujin/dxvk 'dxvk-[0-9.]+\.tar\.gz$' "$tmp/dxvk.tar.gz"; then
   rm -rf "$SHARE/dxvk"; mkdir -p "$SHARE/dxvk"
   tar -xzf "$tmp/dxvk.tar.gz" -C "$SHARE/dxvk" --strip-components=1 --no-same-owner
 else echo "NOVORA AVISO: no se pudo descargar DXVK."; fi
-if fetch_release HansKristian-Arntzen/vkd3d-proton 'vkd3d-proton-[0-9.]+\.tar\.zst$' "$tmp/vkd3d.tar.zst"; then
+if fetch_release HansKristian-Work/vkd3d-proton 'vkd3d-proton-[0-9.]+\.tar\.zst$' "$tmp/vkd3d.tar.zst"; then
   rm -rf "$SHARE/vkd3d-proton"; mkdir -p "$SHARE/vkd3d-proton"
   tar --zstd -xf "$tmp/vkd3d.tar.zst" -C "$SHARE/vkd3d-proton" --strip-components=1 --no-same-owner
 else echo "NOVORA AVISO: no se pudo descargar VKD3D-Proton."; fi

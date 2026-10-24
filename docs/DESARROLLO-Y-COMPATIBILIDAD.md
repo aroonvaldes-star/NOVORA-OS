@@ -23,7 +23,7 @@ Todo funciona **dentro de NOVORA OS**, sin máquinas virtuales ni Windows aparte
 |---|---|
 | IDE | **Android Studio**: `novora-dev instalar android-studio ARCHIVO.tar.gz --sha256 HASH` |
 | Teléfono | `adb`, `fastboot` y reglas USB de Android; `novora-dev telefono` lista los dispositivos |
-| Ver y controlar el teléfono | `novora-dev espejo` (scrcpy) |
+| Ver y controlar el teléfono | `novora-dev espejo` (scrcpy; en Debian 13 solo está en trixie-backports y el hook 9200 lo instala de ahí) |
 | Java | OpenJDK 21 (Android Studio trae el suyo propio) |
 
 ## 3. Aplicaciones de Windows (Wine)

@@ -7,7 +7,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="${HERE}/../config/includes.chroot/usr/local/bin"
 TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 F="${TMP}/fake"; mkdir -p "${F}"
-export HOME="${TMP}/home"; mkdir -p "${HOME}"; unset XDG_DATA_HOME
+export HOME="${TMP}/home"; mkdir -p "${HOME}"; unset XDG_DATA_HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_STATE_HOME
 pass=0 fail=0
 ok()  { echo "  PASÓ  $*"; pass=$((pass + 1)); }
 bad() { echo "  FALLÓ $*"; fail=$((fail + 1)); }
@@ -162,6 +162,15 @@ bash "${BIN}/novora-dev" instalar android-studio "${TMP}/as.tar.gz" --sha256 "$(
 mkdir -p "${TMP}/evil/x" && touch "${TMP}/evil/x/a" && tar -czf "${TMP}/evil.tar.gz" -C "${TMP}/evil" x --transform 's,^x/a,x/../../escapado,'
 bash "${BIN}/novora-dev" instalar rider "${TMP}/evil.tar.gz" >/dev/null 2>&1 && bad "aceptó tar con '..'" || ok "rechaza archivos con rutas '..'"
 [[ ! -e "${HOME}/.local/escapado" && ! -e "${TMP}/escapado" ]] && ok "no se escribió fuera del destino" || bad "escape de ruta"
+# Regresión: con pipefail, «tar -tzf | grep -q» daba SIGPIPE cuando la ruta peligrosa
+# iba primera y el archivo era grande, y el archivo se aceptaba.
+mkdir -p "${TMP}/evil2/x/muchos" && touch "${TMP}/evil2/x/a"
+for i in $(seq 1 20000); do printf '' > "${TMP}/evil2/x/muchos/archivo-con-nombre-largo-${i}"; done
+tar -czf "${TMP}/evil2.tar.gz" -C "${TMP}/evil2" x/a x/muchos --transform 's,^x/a,x/../../escapado2,'
+out="$(bash "${BIN}/novora-dev" instalar rider "${TMP}/evil2.tar.gz" --sha256 "$(sha256sum "${TMP}/evil2.tar.gz" | cut -d' ' -f1)" 2>&1)"
+# Se exige el rechazo de NOVORA, no la protección propia de GNU tar al extraer.
+grep -q "rutas peligrosas" <<< "${out}" && ok "rechaza '..' aunque el tar sea grande (sin SIGPIPE)" \
+  || bad "la comprobación de rutas no detectó '..' en un tar grande: ${out}"
 
 echo "4) actualizaciones"
 PRE="${HERE}/../config/includes.chroot/usr/lib/novora/novora-instantanea-pre-apt"

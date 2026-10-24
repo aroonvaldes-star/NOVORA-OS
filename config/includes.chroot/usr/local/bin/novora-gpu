@@ -32,9 +32,9 @@ gpus() {  # una línea por GPU: "vendor_id|descripción|driver"
     line && /Kernel driver in use:/ { drv=$NF }
     END { if (line) print line "|" drv }'
 }
-has_nvidia() { gpus | grep -q '^10de|'; }
+has_nvidia() { grep -q '^10de|' < <(gpus); }
 is_live() { grep -qw 'boot=live' "${CMDLINE}" 2>/dev/null; }
-sb_enabled() { have mokutil && mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; }
+sb_enabled() { have mokutil && grep -qi 'enabled' < <(mokutil --sb-state 2>/dev/null); }
 
 cmd="${1:-estado}"; shift || true
 case "${cmd}" in

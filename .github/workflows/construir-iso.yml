@@ -1,0 +1,170 @@
+# NOVORA OS — pruebas y construcción real de la ISO (R-09 de la revisión).
+# Corre en los servidores de GitHub: NO toca ningún disco físico del usuario.
+name: Construir ISO
+
+on:
+  workflow_dispatch:
+    inputs:
+      atlas_requerido:
+        description: "Fallar si no se puede instalar el motor de ATLAS (llama.cpp)"
+        type: boolean
+        default: false
+      subir_iso:
+        description: "Subir también la ISO como artefacto (varios GB; en repos privados gratuitos el límite de almacenamiento es bajo)"
+        type: boolean
+        default: false
+  pull_request:
+    paths: ["config/**", "scripts/**", "tests/**", ".github/workflows/construir-iso.yml"]
+  push:
+    branches: [main]
+    paths: ["config/**", "scripts/**", "tests/**", ".github/workflows/construir-iso.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: construir-iso-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pruebas:
+    name: Pruebas automáticas
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Batería completa (incluye discos loop desechables)
+        run: |
+          set -o pipefail
+          sudo env "PATH=$PATH" bash tests/run-tests.sh 2>&1 | tee pruebas.log
+      - name: Mostrar el error como anotación
+        if: failure()
+        run: |
+          echo "::error title=Pruebas: líneas con fallos::$(grep -nE 'FAIL|ERROR|FALLÓ|Traceback|Error|error:|SC[0-9]{4}' pruebas.log | head -60 | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+          echo "::error title=Pruebas: final del registro::$(tail -80 pruebas.log | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+
+  paquetes:
+    name: Verificar los paquetes en Debian 13
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Comprobar cada paquete de las listas (main, contrib, non-free, non-free-firmware)
+        run: |
+          set -o pipefail
+          sudo docker run --rm -v "$GITHUB_WORKSPACE":/src -w /src debian:trixie bash -euo pipefail -c '
+            # Mismas secciones que build-iso.sh (lb config --archive-areas).
+            AREAS=$(sed -n "s/.*--archive-areas \"\([^\"]*\)\".*/\1/p" scripts/build-iso.sh)
+            echo "Secciones de la construcción: $AREAS"
+            sed -i "s/^Components: main$/Components: $AREAS/" /etc/apt/sources.list.d/debian.sources
+            apt-get update -q >/dev/null
+            lista=$(grep -hvE "^\s*(#|$)" config/package-lists/*.list.chroot | sed "s/#.*//" | tr -s " \t" "\n" | sort -u)
+            faltan=""
+            for p in $lista; do
+              [ -n "$(apt-cache policy "$p" | sed -n "s/^  Candidate: //p" | grep -v "(none)")" ] || faltan="$faltan $p"
+            done
+            # Dónde están los que faltan: todas las secciones + backports.
+            sed -i "s/^Components: .*/Components: main contrib non-free non-free-firmware/" /etc/apt/sources.list.d/debian.sources
+            sed -i "s/^Suites: trixie trixie-updates$/Suites: trixie trixie-updates trixie-backports/" /etc/apt/sources.list.d/debian.sources
+            apt-get update -q >/dev/null
+            n=0
+            for p in $faltan; do
+              n=$((n+1))
+              donde=$(apt-cache madison "$p" | awk -F"|" "{gsub(/ /,\"\",\$3); print \$3}" | sort -u | tr "\n" " ")
+              echo "FALTA: $p · disponible en: ${donde:-ninguna} · parecidos: $(apt-cache search --names-only "^$p" | cut -d" " -f1 | head -4 | tr "\n" " ")"
+            done
+            echo "Paquetes que faltan: $n"
+            [ "$n" -eq 0 ]' 2>&1 | tee paquetes.log
+      - name: Mostrar los que faltan
+        if: failure()
+        run: echo "::error title=Paquetes que no existen en Debian 13::$(grep -E 'FALTA|faltan' paquetes.log | tr -d '\r' | sed -e 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"
+
+  iso:
+    name: Construir la ISO en Debian 13
+    needs: [pruebas, paquetes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Liberar espacio en el servidor
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af >/dev/null
+          df -h /
+
+      - name: Construir con live-build (contenedor debian:trixie)
+        env:
+          ATLAS_FLAG: ${{ inputs.atlas_requerido && '--atlas-required' || '' }}
+        run: |
+          set -o pipefail
+          sudo docker run --rm --privileged \
+            -v "$GITHUB_WORKSPACE":/src -w /src -e "ATLAS_FLAG=${ATLAS_FLAG:-}" \
+            debian:trixie bash -euo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -q
+              apt-get install -y -q --no-install-recommends \
+                live-build debootstrap xorriso squashfs-tools ca-certificates git
+              git config --global --add safe.directory /src
+              bash scripts/build-iso.sh ${ATLAS_FLAG:-}' 2>&1 | tee construccion.log
+
+      - name: Mostrar el error como anotación
+        if: failure()
+        run: |
+          limpiar() { tr -d '\r' | sed -e 's/\x1b\[[0-9;]*[A-Za-z]//g' -e 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g'; }
+          echo "::error title=ISO: líneas con errores::$(grep -naiE '^E:|error|fail|denied|cannot|not found|no se pudo|falta|AVISO' construccion.log 2>/dev/null | tail -40 | limpiar)"
+          echo "::error title=ISO: final de la salida::$(tail -60 construccion.log 2>/dev/null | limpiar)"
+          echo "::error title=ISO: espacio libre::$(df -h / | sed ':a;N;$!ba;s/\n/%0A/g')"
+
+      - name: Resumen
+        if: always()
+        run: |
+          enc() { tr -d '\r' | sed -e 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g'; }
+          if ls build/*.sha256 >/dev/null 2>&1; then
+            {
+              echo "SHA256: $(cat build/*.sha256)"
+              echo "Tamaño: $(du -h build/*.iso | cut -f1) ($(stat -c %s build/*.iso) bytes)"
+              echo "Avisos NOVORA:"; grep -h "NOVORA AVISO" build/build.log | sort -u | head -30 || echo "  ninguno"
+              echo "Instalado por los hooks:"; grep -hE "^NOVORA: |ATLAS: " build/build.log | sort -u | head -20 || true
+              echo "Versiones:"
+              grep -hE "^(llama-server|linux-image-[0-9][^ ]*-amd64|plasma-desktop|kwin-wayland|wine|wine64|winehq-stable|wine-stable|llama\.cpp-tools|dotnet-sdk-[0-9.]+|libreoffice-core|calamares|clamav|firefox-esr|scrcpy|mesa-vulkan-drivers|shim-signed|grub-efi-amd64-signed)[[:space:]]" build/*.packages | sort -u | head -40
+              echo "Paquetes en total: $(cat build/*.packages | wc -l)"
+            } > iso-resumen.txt
+            echo "::notice title=ISO construida::$(enc < iso-resumen.txt)"
+          fi
+          {
+            echo "## NOVORA OS — construcción"
+            if ls build/*.sha256 >/dev/null 2>&1; then
+              echo "ISO creada: \`$(cat build/*.sha256)\`"
+              echo "Tamaño: $(du -h build/*.iso | cut -f1)"
+            else
+              echo "**No se generó la ISO.** Revisa \`build.log\` en los artefactos."
+            fi
+            echo
+            echo "### Avisos de NOVORA en la construcción"
+            echo '```'
+            grep -h "NOVORA AVISO" build/build.log 2>/dev/null | sort -u | head -50 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Registro, huella y lista de paquetes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: novora-os-construccion
+          path: |
+            construccion.log
+            build/build.log
+            build/*.sha256
+            build/*.packages
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: ISO (opcional)
+        if: success() && inputs.subir_iso
+        uses: actions/upload-artifact@v4
+        with:
+          name: novora-os-iso
+          path: build/*.iso
+          compression-level: 0
+          retention-days: 3

@@ -147,9 +147,20 @@ Orientación para la RTX 3050 Laptop de 4 GB (medirlo en tu equipo): modelos de 
 
 ## Construcción
 
-- El hook `9100-novora-atlas` instala `llama.cpp-tools` desde trixie y, si no hay versión ahí, desde trixie-backports.
-- También instala el backend Vulkan de ggml si existe. Así la GPU puede usarse sin el controlador propietario (vía Mesa/NVK), lo que **está pendiente de verificar**.
-- Con `--atlas-required`, la construcción falla si no se pudo instalar el motor.
+El hook `9100-novora-atlas` busca el motor en este orden:
+
+1. `llama.cpp-tools` de Debian, primero en trixie y luego en trixie-backports.
+2. **Si no existe** (caso real: no está ni en trixie ni en backports), instala el **`llama-server` oficial de ggml-org/llama.cpp** en su versión **Vulkan**:
+   - **Versión:** la compilación `bXXXX` más reciente. llama.cpp publica cada compilación como *prerelease* y su «latest» no trae binarios.
+   - **Huella:** se verifica con la SHA256 que publica GitHub.
+   - **Ubicación:** en `/usr/lib/novora/llama`, con un envoltorio en `/usr/local/bin/llama-server`.
+   - **Comprobación:** solo se da por instalado si `llama-server --version` responde.
+
+La versión Vulkan usa la GPU con Mesa (Intel, AMD, NVK) o con el driver de NVIDIA, y la CPU si no hay GPU. Que use la RTX 3050 **está pendiente de verificar** (A01/A05).
+
+Con `--atlas-required`, la construcción falla si no se pudo instalar el motor.
+
+**Construcción real (GitHub Actions, 24 de octubre de 2026):** `llama-server` b11868 (commit `78a8ae14b`) instalado y arrancando, sin avisos.
 
 ## Pruebas
 

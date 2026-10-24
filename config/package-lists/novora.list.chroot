@@ -18,7 +18,7 @@ konsole
 dolphin
 kate
 ark
-spectacle
+kde-spectacle
 plasma-discover
 plasma-discover-backend-flatpak
 flatpak
@@ -84,7 +84,7 @@ libnotify-bin
 # Android: adb/fastboot, espejo y control del teléfono, reglas USB, JDK [VERIFICAR]
 adb
 fastboot
-scrcpy
+# scrcpy: solo está en trixie-backports (contrib); lo instala el hook 9200
 android-sdk-platform-tools-common
 openjdk-21-jdk-headless
 # Multimedia y compilación nativa
