@@ -34,15 +34,25 @@ done
 esp_src=$("$FINDMNT" -no SOURCE --mountpoint "$efidir") || die "la ESP no está montada en $efidir"
 root_src=$("$FINDMNT" -no SOURCE --mountpoint /) || die "no se pudo determinar la raíz"
 esp_fs=$("$LSBLK" -dno FSTYPE "$esp_src")
-esp_disk=$("$LSBLK" -dno PKNAME "$esp_src")
-root_disk=$("$LSBLK" -dno PKNAME "$root_src")
 [ "$esp_fs" = "vfat" ] || die "la ESP ($esp_src) no es vfat"
+# Cadena hacia abajo de cada dispositivo (la raíz puede ser LUKS:
+# dm-0 crypt → sdb3 part → sdb disk). Disco = el último de tipo disk.
+chain() { "$LSBLK" -nsro KNAME,TYPE "$1"; }
+disk_of() { chain "$1" | awk '$2 == "disk" { d = $1 } END { print d }'; }
+esp_disk=$(disk_of "$esp_src")
+root_disk=$(disk_of "$root_src")
 if [ -z "$esp_disk" ] || [ "$esp_disk" != "$root_disk" ]; then
   die "ESP ($esp_src, disco ${esp_disk:-?}) y raíz ($root_src, disco ${root_disk:-?}) en discos distintos"
 fi
 for dev in "$esp_src" "$root_src"; do
-  ro=$(cat "$SYSBLOCK/$(basename "$dev")/ro" 2>/dev/null || echo '?')
-  [ "$ro" = "0" ] || die "$dev no es escribible (ro=$ro): no es el destino autorizado"
+  # Todo lo que hay entre el sistema de archivos y el disco debe estar
+  # desbloqueado por el guardián (ro=0); si no, no es el destino autorizado.
+  knames=$(chain "$dev" | awk '$2 != "disk" { print $1 }')
+  [ -n "$knames" ] || die "no se pudo determinar la cadena de $dev"
+  for kname in $knames; do
+    ro=$(cat "$SYSBLOCK/$kname/ro" 2>/dev/null || echo '?')
+    [ "$ro" = "0" ] || die "$dev ($kname) no es escribible (ro=$ro): no es el destino autorizado"
+  done
 done
 
 case " $* " in *" --no-nvram "*) extra='' ;; *) extra='--no-nvram' ;; esac

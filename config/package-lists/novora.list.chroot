@@ -56,6 +56,11 @@ grub-efi-amd64
 grub-efi-amd64-signed
 shim-signed
 efibootmgr
+# novora-copiar-sistema: raíz LUKS2 desbloqueada en el initramfs, copia con rsync
+cryptsetup
+cryptsetup-initramfs
+rsync
+dosfstools
 
 # Diagnóstico de discos SOLO LECTURA (SMART, USB) [VERIFICAR]
 smartmontools

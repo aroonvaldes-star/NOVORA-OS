@@ -1,15 +1,30 @@
 #!/usr/bin/env bash
 # NOVORA OS — lanzador del instalador con guardián de discos (requiere root).
 # Flujo: bloqueo total -> auditoría y selección -> confirmación escrita ->
-# desbloqueo SOLO del disco autorizado -> verificación -> Calamares ->
-# bloqueo total de nuevo.
+# desbloqueo SOLO del disco autorizado -> verificación -> copia del sistema
+# (novora-copiar-sistema: LUKS2 + ext4 en el destino, /boot en la FAT32 del
+# mismo disco) -> bloqueo total de nuevo.
 #
-# v0.1.1: la instalación en HARDWARE FÍSICO está deshabilitada hasta superar
-# las pruebas P0 en VM (ver AUDITORIA-CLAUDE.md). Solo se permite en VM.
+# Opciones:
+#   --equipo-real  permite instalar fuera de una VM. Las pruebas P0 en VM
+#                  (T03–T08, T11, T12) aún no tienen evidencia: se pide una
+#                  confirmación escrita adicional.
+#   --calamares    usa Calamares (particionado manual) en vez de la copia
+#                  automática sobre las particiones ya preparadas.
 set -Eeuo pipefail
 ALLOW=/run/novora/allowlist.json
 GUARD=/usr/local/sbin/novora-disk-guard
 AUDIT=/usr/local/bin/novora-storage-audit
+COPY=/usr/lib/novora/novora-copiar-sistema
+
+real=0 calamares=0
+for a in "$@"; do
+  case "$a" in
+    --equipo-real) real=1 ;;
+    --calamares) calamares=1 ;;
+    *) echo "Uso: novora-install [--equipo-real] [--calamares]" >&2; exit 1 ;;
+  esac
+done
 
 relock() { "$GUARD" lockdown >/dev/null 2>&1 || true; }
 trap relock EXIT
@@ -19,19 +34,38 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 virt="$(systemd-detect-virt --vm 2>/dev/null || true)"
 if [[ -z "${virt}" || "${virt}" == "none" ]]; then
-  cat >&2 <<'EOF'
-INSTALACIÓN FÍSICA BLOQUEADA en NOVORA OS 0.1.1.
-El instalador solo puede usarse en una máquina virtual con discos desechables
-hasta que las pruebas P0 (T03–T08, T11, T12) estén aprobadas con evidencia.
+  if [[ "${real}" -ne 1 ]]; then
+    cat >&2 <<'EOF'
+INSTALACIÓN FÍSICA BLOQUEADA por defecto en NOVORA OS 0.1.1.
+Las pruebas P0 en VM (T03–T08, T11, T12) todavía no tienen evidencia.
+Si aun así quieres instalar en este equipo: sudo novora-install --equipo-real
 No se ha escrito nada en ningún disco.
 EOF
-  exit 4
+    exit 4
+  fi
+  cat <<'EOF'
+=== INSTALACIÓN EN EQUIPO REAL ===
+Antes de seguir, comprueba que:
+  * tienes una copia de tus datos importantes del disco externo;
+  * guardaste la clave de recuperación de BitLocker de Windows (por si el
+    firmware la pide al cambiar de disco de arranque);
+  * el «Inicio rápido» de Windows está desactivado.
+Solo se escribirá en las dos particiones que elijas del disco USB; el disco
+de Windows y las demás particiones quedan en solo lectura.
+Para seguir escribe exactamente: ENTIENDO EL RIESGO
+EOF
+  read -r answer
+  [[ "${answer}" == "ENTIENDO EL RIESGO" ]] || { echo 'Cancelado; no se ha escrito nada.' >&2; exit 1; }
+else
+  echo "Máquina virtual detectada (${virt})."
 fi
-echo "Máquina virtual detectada (${virt}). Modo de pruebas."
 
 "$GUARD" lockdown
 rm -f "${ALLOW}"
-if ! "$AUDIT" --interactive --emit-allowlist "${ALLOW}"; then
+echo
+echo 'Elige la partición del SISTEMA (p. ej. la ext4 de 1 TB) y la de ARRANQUE'
+echo '(la FAT32 del mismo disco). La FAT32 no se formatea.'
+if ! "$AUDIT" --interactive --esp-fat --emit-allowlist "${ALLOW}"; then
   echo 'Selección bloqueada o cancelada. No se ha escrito nada.' >&2; exit 3
 fi
 code="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"]["partuuid"][-6:])' "${ALLOW}")"
@@ -43,6 +77,10 @@ if [[ "${answer}" != "INSTALAR ${code}" ]]; then
 fi
 "$GUARD" unlock --allowlist "${ALLOW}" --apply
 "$GUARD" verify --allowlist "${ALLOW}"
-echo 'Abriendo Calamares. Usa PARTICIONADO MANUAL; los demás discos no aparecerán.'
-calamares -d || echo "Calamares terminó con código $?" >&2
+if [[ "${calamares}" -eq 1 ]]; then
+  echo 'Abriendo Calamares. Usa PARTICIONADO MANUAL; los demás discos no aparecerán.'
+  calamares -d || echo "Calamares terminó con código $?" >&2
+else
+  "$COPY" --allowlist "${ALLOW}"
+fi
 "$GUARD" verify --allowlist "${ALLOW}" || echo 'AVISO: el estado de bloqueo cambió durante la instalación.' >&2
