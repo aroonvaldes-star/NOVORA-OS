@@ -20,6 +20,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -128,7 +129,7 @@ fun LauncherScreen() {
             // Deslizar hacia abajo abre la búsqueda (Spotlight).
             .pointerInput(Unit) {
                 var total = 0f
-                androidx.compose.foundation.gestures.detectVerticalDragGestures(
+                detectVerticalDragGestures(
                     onDragStart = { total = 0f },
                     onDragEnd = { if (total > 150f) searching = true },
                 ) { _, dy -> total += dy }
