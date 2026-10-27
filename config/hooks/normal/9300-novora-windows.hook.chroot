@@ -7,6 +7,9 @@
 #  2) DXVK (DirectX 9-11 -> Vulkan) y VKD3D-Proton (DirectX 12 -> Vulkan)
 #     incluidos en la ISO para optimizar prefijos SIN internet.
 #  3) winetricks (última versión publicada).
+#  Si GitHub Releases no responde, DXVK y VKD3D-Proton se compilan desde su
+#  código fuente (git, último tag) y winetricks sale del tag por git o, si no,
+#  del paquete de Debian (contrib).
 # Cada descarga queda registrada con su versión y SHA256 en build.log.
 set -eu
 chmod 0755 /usr/local/bin/novora-win
@@ -91,21 +94,77 @@ for d in json.load(sys.stdin):
   fi
   echo "NOVORA: $1 $tag sha256=$got (huella: $( [ "$want" = "-" ] && echo "NO verificada, GitHub no la dio" || echo "verificada con GitHub"))"
 }
+# Respaldo sin GitHub Releases: el código fuente por git (github.com por HTTPS)
+# en el tag más reciente que cumpla el patrón; build.log anota el commit exacto.
+git_latest_tag() {  # $1 repo, $2 regex ERE del tag completo
+  git ls-remote --tags --refs "https://github.com/$1" 2>/dev/null \
+    | sed 's#.*refs/tags/##' | grep -E "^($2)\$" | sort -V | tail -1
+}
+git_clone_tag() {  # $1 repo, $2 tag, $3 destino; resto: opciones de git clone
+  r=$1; t=$2; d=$3; shift 3
+  git clone -q --depth 1 "$@" --branch "$t" "https://github.com/$r" "$d" || return 1
+  echo "NOVORA: $r $t desde el código fuente (commit $(git -C "$d" rev-parse HEAD))"
+}
+# Herramientas de compilación: build_deps_purge quita SOLO las que no estaban antes.
+installed_pkgs() {
+  dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' | awk '$1 == "ii" {print $2}' | sort
+}
+build_deps_install() {
+  installed_pkgs >/tmp/novora-pkgs-antes
+  apt-get install -y --no-install-recommends "$@" || true
+}
+build_deps_purge() {
+  nuevos=$(installed_pkgs | comm -13 /tmp/novora-pkgs-antes -)
+  # shellcheck disable=SC2086  # lista de paquetes, uno por palabra
+  [ -z "$nuevos" ] || apt-get purge -y $nuevos
+  rm -f /tmp/novora-pkgs-antes
+}
+# DXVK y VKD3D-Proton desde su código fuente con MinGW (las mismas DLL PE que
+# publican, vía su package-release.sh). $1 repo, $2 carpeta en $SHARE.
+build_dx_layer() {
+  tag=$(git_latest_tag "$1" 'v[0-9]+(\.[0-9]+)+')
+  [ -n "$tag" ] || { echo "NOVORA AVISO: $1: git no dio ningún tag"; return 1; }
+  git_clone_tag "$1" "$tag" "$tmp/$2-src" --recurse-submodules --shallow-submodules || return 1
+  (cd "$tmp/$2-src" && ./package-release.sh "${tag#v}" "$tmp/$2-out" --no-package) >"$tmp/$2.log" 2>&1 \
+    || { tail -20 "$tmp/$2.log"; echo "NOVORA AVISO: $1 $tag: falló la compilación"; return 1; }
+  rm -rf "${SHARE:?}/$2"; mkdir -p "$SHARE/$2"
+  cp -a "$tmp/$2-out/$2-${tag#v}/." "$SHARE/$2/"
+  echo "NOVORA WIN: $2 $tag compilado ($(find "$SHARE/$2" -name '*.dll' | wc -l) DLL)"
+}
 tmp=$(mktemp -d)
+need_src=""
 if fetch_release doitsujin/dxvk 'dxvk-[0-9.]+\.tar\.gz$' "$tmp/dxvk.tar.gz"; then
   rm -rf "$SHARE/dxvk"; mkdir -p "$SHARE/dxvk"
   tar -xzf "$tmp/dxvk.tar.gz" -C "$SHARE/dxvk" --strip-components=1 --no-same-owner
-else echo "NOVORA AVISO: no se pudo descargar DXVK."; fi
+else need_src="$need_src dxvk"; fi
 if fetch_release HansKristian-Work/vkd3d-proton 'vkd3d-proton-[0-9.]+\.tar\.zst$' "$tmp/vkd3d.tar.zst"; then
   rm -rf "$SHARE/vkd3d-proton"; mkdir -p "$SHARE/vkd3d-proton"
   tar --zstd -xf "$tmp/vkd3d.tar.zst" -C "$SHARE/vkd3d-proton" --strip-components=1 --no-same-owner
-else echo "NOVORA AVISO: no se pudo descargar VKD3D-Proton."; fi
+else need_src="$need_src vkd3d-proton"; fi
+if [ -n "$need_src" ]; then
+  echo "NOVORA WIN: compilando desde el código fuente:$need_src"
+  build_deps_install git ca-certificates meson ninja-build glslang-tools mingw-w64 mingw-w64-tools python3
+  for t in x86_64-w64-mingw32 i686-w64-mingw32; do   # DXVK exige hilos POSIX
+    for c in gcc g++; do update-alternatives --set "$t-$c" "/usr/bin/$t-$c-posix" >/dev/null 2>&1 || true; done
+  done
+  for c in $need_src; do
+    case $c in
+      dxvk) build_dx_layer doitsujin/dxvk dxvk || echo "NOVORA AVISO: no se pudo descargar DXVK." ;;
+      vkd3d-proton) build_dx_layer HansKristian-Work/vkd3d-proton vkd3d-proton \
+                      || echo "NOVORA AVISO: no se pudo descargar VKD3D-Proton." ;;
+    esac
+  done
+  build_deps_purge
+fi
 wt_tag=$(wget -q -O- https://api.github.com/repos/Winetricks/winetricks/releases/latest \
          | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null || true)
+[ -n "$wt_tag" ] || wt_tag=$(git_latest_tag Winetricks/winetricks '[0-9]{8}')
 if [ -n "$wt_tag" ] && wget -q -O /usr/local/bin/winetricks \
      "https://raw.githubusercontent.com/Winetricks/winetricks/$wt_tag/src/winetricks"; then
   chmod 0755 /usr/local/bin/winetricks
   echo "NOVORA WIN: winetricks $wt_tag sha256=$(sha256sum /usr/local/bin/winetricks | cut -d' ' -f1)"
+elif rm -f /usr/local/bin/winetricks && apt-get install -y --no-install-recommends winetricks; then
+  echo "NOVORA WIN: winetricks de Debian $(dpkg-query -W -f='${Version}' winetricks)"
 else echo "NOVORA AVISO: no se pudo descargar winetricks."; fi
 rm -rf "$tmp"
 

@@ -1,7 +1,9 @@
 #!/bin/sh
 # shellcheck disable=SC1091  # build.conf lo genera build-iso.sh
 # NOVORA OS — instala el motor de ATLAS (llama-server, paquete Debian
-# llama.cpp-tools). Primero intenta trixie; si no hay candidato, trixie-backports.
+# llama.cpp-tools). Primero intenta trixie; si no hay candidato, trixie-backports;
+# luego el binario oficial de ggml-org y, si GitHub Releases no responde, lo
+# compila desde el código fuente (git, último tag bNNNN) con Vulkan.
 # Si no se puede instalar, ATLAS queda instalado pero avisa "sin motor"
 # (no rompe la ISO). NOVORA_ATLAS_ENGINE=required en
 # /etc/novora-atlas/build.conf hace que la construcción falle en ese caso.
@@ -94,15 +96,58 @@ for d in json.load(sys.stdin):
   fi
   echo "NOVORA: $1 $tag sha256=$got (huella: $( [ "$want" = "-" ] && echo "NO verificada, GitHub no la dio" || echo "verificada con GitHub"))"
 }
+# Respaldo sin GitHub Releases: el código fuente por git (github.com por HTTPS)
+# en el tag más reciente que cumpla el patrón; build.log anota el commit exacto.
+git_latest_tag() {  # $1 repo, $2 regex ERE del tag completo
+  git ls-remote --tags --refs "https://github.com/$1" 2>/dev/null \
+    | sed 's#.*refs/tags/##' | grep -E "^($2)\$" | sort -V | tail -1
+}
+git_clone_tag() {  # $1 repo, $2 tag, $3 destino; resto: opciones de git clone
+  r=$1; t=$2; d=$3; shift 3
+  git clone -q --depth 1 "$@" --branch "$t" "https://github.com/$r" "$d" || return 1
+  echo "NOVORA: $r $t desde el código fuente (commit $(git -C "$d" rev-parse HEAD))"
+}
+# Herramientas de compilación: build_deps_purge quita SOLO las que no estaban antes.
+installed_pkgs() {
+  dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\n' | awk '$1 == "ii" {print $2}' | sort
+}
+build_deps_install() {
+  installed_pkgs >/tmp/novora-pkgs-antes
+  apt-get install -y --no-install-recommends "$@" || true
+}
+build_deps_purge() {
+  nuevos=$(installed_pkgs | comm -13 /tmp/novora-pkgs-antes -)
+  # shellcheck disable=SC2086  # lista de paquetes, uno por palabra
+  [ -z "$nuevos" ] || apt-get purge -y $nuevos
+  rm -f /tmp/novora-pkgs-antes
+}
+LLAMA=/usr/lib/novora/llama
+# Deja llama-server de $LLAMA en el PATH y comprueba que arranca. $1: origen.
+activate_llama() {
+  cat >/usr/local/bin/llama-server <<'SH'
+#!/bin/sh
+# NOVORA OS: llama-server (ggml-org) con sus bibliotecas en /usr/lib/novora/llama
+export LD_LIBRARY_PATH="/usr/lib/novora/llama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec /usr/lib/novora/llama/llama-server "$@"
+SH
+  chmod 0755 /usr/local/bin/llama-server
+  if /usr/local/bin/llama-server --version >/dev/null 2>&1; then
+    installed=1
+    echo "NOVORA: llama-server $1 instalado (Vulkan)."
+  else
+    echo "NOVORA AVISO: llama-server $1 no arranca; bibliotecas que faltan:"
+    LD_LIBRARY_PATH=$LLAMA ldd "$LLAMA/llama-server" | grep "not found" || true
+    rm -f /usr/local/bin/llama-server
+  fi
+}
 # Respaldo: binario oficial de llama.cpp (ggml-org) con backend Vulkan, que usa
 # la GPU con Mesa (Intel, AMD, NVK) o con el driver de NVIDIA, y si no hay GPU
 # funciona en CPU. Se instala aparte en /usr/lib/novora/llama.
 if [ "$installed" -ne 1 ]; then
   echo "ATLAS: llama.cpp-tools no está en Debian; probando el binario oficial de ggml-org/llama.cpp"
+  apt-get install -y --no-install-recommends libvulkan1 libgomp1 || true
   tmp=$(mktemp -d)
   if fetch_release ggml-org/llama.cpp 'bin-ubuntu-vulkan-x64\.(zip|tar\.gz)$' "$tmp/llama.pkg" 'llama-{tag}-bin-ubuntu-vulkan-x64.tar.gz'; then
-    apt-get install -y --no-install-recommends libvulkan1 libgomp1 || true
-    LLAMA=/usr/lib/novora/llama
     rm -rf "$LLAMA"; mkdir -p "$LLAMA"
     if python3 - "$tmp/llama.pkg" "$LLAMA" <<'PY'
 import os, shutil, sys, tarfile, tempfile, zipfile
@@ -130,23 +175,34 @@ for name in os.listdir(src):                       # binarios y bibliotecas de e
 os.chmod(os.path.join(dest, "llama-server"), 0o755)
 PY
     then
-      cat >/usr/local/bin/llama-server <<'SH'
-#!/bin/sh
-# NOVORA OS: llama-server oficial (ggml-org) con sus bibliotecas en /usr/lib/novora/llama
-export LD_LIBRARY_PATH="/usr/lib/novora/llama${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec /usr/lib/novora/llama/llama-server "$@"
-SH
-      chmod 0755 /usr/local/bin/llama-server
-      if /usr/local/bin/llama-server --version >/dev/null 2>&1; then
-        installed=1
-        echo "NOVORA: llama-server oficial instalado (Vulkan)."
-      else
-        echo "NOVORA AVISO: llama-server oficial no arranca; bibliotecas que faltan:"
-        LD_LIBRARY_PATH=/usr/lib/novora/llama ldd /usr/lib/novora/llama/llama-server | grep "not found" || true
-        rm -f /usr/local/bin/llama-server
-      fi
+      activate_llama oficial
     fi
   fi
+  rm -rf "$tmp"
+fi
+# Último respaldo, para redes que bloquean GitHub Releases pero no git: compilar
+# llama-server desde el código fuente del último tag bNNNN (el mismo que
+# publicaría el binario oficial) con Vulkan. Las herramientas de compilación
+# que no estaban se purgan al terminar.
+if [ "$installed" -ne 1 ]; then
+  echo "ATLAS: probando compilar llama.cpp desde el código fuente (git)"
+  tmp=$(mktemp -d)
+  build_deps_install git ca-certificates cmake build-essential pkg-config libvulkan-dev glslc spirv-headers
+  tag=$(git_latest_tag ggml-org/llama.cpp 'b[0-9]+')
+  if [ -n "$tag" ] && git_clone_tag ggml-org/llama.cpp "$tag" "$tmp/src" \
+     && cmake -S "$tmp/src" -B "$tmp/b" -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON \
+          -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=OFF -DBUILD_SHARED_LIBS=ON -DLLAMA_CURL=OFF \
+          -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON >/dev/null \
+     && cmake --build "$tmp/b" -j"$(nproc)" --target llama-server >/dev/null; then
+    rm -rf "$LLAMA"; mkdir -p "$LLAMA"
+    cp -a "$tmp/b/bin/llama-server" "$LLAMA/"
+    find "$tmp/b/bin" -maxdepth 1 -name '*.so*' -exec cp -a {} "$LLAMA/" \;
+    find "$LLAMA" -type f -exec strip --strip-unneeded {} + 2>/dev/null || true
+    activate_llama "compilado ($tag)"
+  else
+    echo "NOVORA AVISO: ggml-org/llama.cpp: no se pudo compilar desde el código fuente."
+  fi
+  build_deps_purge
   rm -rf "$tmp"
 fi
 if [ "$installed" -ne 1 ]; then

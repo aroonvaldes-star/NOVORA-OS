@@ -155,6 +155,7 @@ El hook `9100-novora-atlas` busca el motor en este orden:
    - **Huella:** se verifica con la SHA256 que publica GitHub.
    - **Ubicación:** en `/usr/lib/novora/llama`, con un envoltorio en `/usr/local/bin/llama-server`.
    - **Comprobación:** solo se da por instalado si `llama-server --version` responde.
+3. **Si GitHub Releases no responde** (redes que solo dejan pasar git), **compila `llama-server`** desde el código fuente del mismo tag `bXXXX`, con Vulkan, y lo deja en el mismo sitio. `build.log` anota el commit exacto. Las herramientas de compilación que no estaban antes se purgan al terminar.
 
 La versión Vulkan usa la GPU con Mesa (Intel, AMD, NVK) o con el driver de NVIDIA, y la CPU si no hay GPU. Que use la RTX 3050 **está pendiente de verificar** (A01/A05).
 
