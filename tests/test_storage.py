@@ -53,6 +53,21 @@ class Evaluate(unittest.TestCase):
         self.assertIsNone(allow)
         self.assertIn("B08", codes(f))
 
+    def test_fat32_from_windows_accepted_only_when_asked(self):
+        """Disco del usuario: FAT32 0x0c (100 GB) + ext4 (1 TB) creadas en Windows."""
+        t = tree("base")
+        t[1]["children"][1]["parttype"] = "0xc"
+        t[1]["children"][2]["fstype"] = "ext4"
+        f, allow = ns.evaluate(t, "/dev/sdb3", "/dev/sdb2", True, allow_fat_esp=True)
+        self.assertEqual(codes(f), set(), f)
+        self.assertTrue({"W05", "W10"} <= codes(f, ns.WARN), f)
+        self.assertEqual(allow["esp"]["parttype"], "0xc")
+        t[1]["children"][1]["parttype"] = "0x7"      # NTFS no sirve aunque se pida
+        f, allow = ns.evaluate(t, "/dev/sdb3", "/dev/sdb2", True, allow_fat_esp=True)
+        self.assertIsNone(allow)
+        f, allow = ns.evaluate(tree("base"), "/dev/sdb3", "/dev/nvme0n1p1", True, allow_fat_esp=True)
+        self.assertIn("B08", codes(f))                # nunca la de Windows
+
     def test_ntfs_data_partition_blocked(self):
         f, allow = ns.evaluate(tree("base"), "/dev/sdb1", "/dev/sdb2", True)
         self.assertIsNone(allow)

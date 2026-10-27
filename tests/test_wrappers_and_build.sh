@@ -10,20 +10,25 @@ TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT
 pass=0 fail=0
 ok()  { echo "  PASÓ  $*"; pass=$((pass + 1)); }
 bad() { echo "  FALLÓ $*"; fail=$((fail + 1)); }
-mkdir -p "${TMP}/bin" "${TMP}/sys/sdb2" "${TMP}/sys/sdb3" "${TMP}/sys/nvme0n1p1"
+mkdir -p "${TMP}/bin" "${TMP}/sys/sdb2" "${TMP}/sys/sdb3" "${TMP}/sys/nvme0n1p1" "${TMP}/sys/dm-0"
 echo 0 > "${TMP}/sys/sdb2/ro"; echo 0 > "${TMP}/sys/sdb3/ro"; echo 1 > "${TMP}/sys/nvme0n1p1/ro"
+echo 0 > "${TMP}/sys/dm-0/ro"
 
 # findmnt/lsblk falsos: la ESP montada viene de $FAKE_ESP.
 cat > "${TMP}/bin/findmnt" <<'EOF'
 #!/bin/sh
-case "$*" in *"--mountpoint /boot/efi"*) echo "$FAKE_ESP" ;; *"--mountpoint /"*) echo /dev/sdb3 ;; *) exit 1 ;; esac
+case "$*" in *"--mountpoint /boot/efi"*) echo "$FAKE_ESP" ;; *"--mountpoint /"*) echo "${FAKE_ROOT:-/dev/sdb3}" ;; *) exit 1 ;; esac
 EOF
 cat > "${TMP}/bin/lsblk" <<'EOF'
 #!/bin/sh
 dev=$(for a; do :; done; echo "$a")
 case "$*" in
   *FSTYPE*) echo vfat ;;
-  *PKNAME*) case "$dev" in /dev/sdb*) echo sdb ;; /dev/nvme0n1*) echo nvme0n1 ;; esac ;;
+  *KNAME,TYPE*) case "$dev" in
+      /dev/mapper/novora-root) printf 'dm-0 crypt\nsdb3 part\nsdb disk\n' ;;
+      /dev/sdb[0-9]*) printf '%s part\nsdb disk\n' "${dev#/dev/}" ;;
+      /dev/nvme0n1p*) printf '%s part\nnvme0n1 disk\n' "${dev#/dev/}" ;;
+    esac ;;
 esac
 EOF
 printf '#!/bin/sh\necho "REAL $*" > "%s/real.log"\n' "${TMP}" > "${TMP}/bin/grub-install-real"
@@ -48,6 +53,13 @@ echo 1 > "${TMP}/sys/sdb2/ro"
 if FAKE_ESP=/dev/sdb2 sh "${G}" --target=x86_64-efi --efi-directory=/boot/efi 2>/dev/null || [[ -f "${TMP}/real.log" ]]; then
   bad "ESP en solo-lectura aceptada"; else ok "ESP no desbloqueada por el guardián rechazada"; fi
 echo 0 > "${TMP}/sys/sdb2/ro"
+rm -f "${TMP}/real.log"
+FAKE_ESP=/dev/sdb2 FAKE_ROOT=/dev/mapper/novora-root sh "${G}" --target=x86_64-efi --efi-directory=/boot/efi 2>/dev/null
+[[ -f "${TMP}/real.log" ]] && ok "raíz LUKS2 (dm-0 sobre sdb3) en el mismo disco aceptada" || bad "raíz LUKS2 rechazada"
+rm -f "${TMP}/real.log"; echo 1 > "${TMP}/sys/sdb3/ro"
+if FAKE_ESP=/dev/sdb2 FAKE_ROOT=/dev/mapper/novora-root sh "${G}" --target=x86_64-efi --efi-directory=/boot/efi 2>/dev/null || [[ -f "${TMP}/real.log" ]]; then
+  bad "raíz LUKS sobre partición bloqueada aceptada"; else ok "raíz LUKS sobre partición en solo-lectura rechazada"; fi
+echo 0 > "${TMP}/sys/sdb3/ro"
 
 echo "2) efibootmgr-readonly"
 rm -f "${TMP}/efi.log"; sh "${E}" -v >/dev/null

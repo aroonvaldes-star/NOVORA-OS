@@ -44,7 +44,7 @@ def show(tree, uefi, show_serial):
         for p in ns.partitions(d):
             choices.append(p.get("path"))
             mnt = ns.mounted_anywhere(p)
-            esp = " ESP" if ns.is_esp(p) else ""
+            esp = " ESP" if ns.is_esp(p) else (" FAT32" if ns.is_fat_boot_candidate(d, p) else "")
             print(f"  [{len(choices)}] {p.get('path')} | {ns.human(p.get('size'))} | "
                   f"{p.get('fstype') or 'SIN FORMATO'}{esp} | "
                   f"montada={'sí' if mnt else 'no'}")
@@ -85,6 +85,8 @@ def main(argv=None):
     ap.add_argument("--interactive", action="store_true")
     ap.add_argument("--target", help="partición raíz candidata (ruta actual)")
     ap.add_argument("--esp", help="ESP del MISMO disco externo")
+    ap.add_argument("--esp-fat", action="store_true",
+                    help="aceptar como ESP una FAT32 normal (0x0c) del mismo disco MBR")
     ap.add_argument("--emit-allowlist", nargs="?", const=DEFAULT_ALLOW,
                     help=f"escribir autorización JSON (defecto {DEFAULT_ALLOW})")
     ap.add_argument("--json", action="store_true", help="salida JSON")
@@ -126,7 +128,7 @@ def main(argv=None):
                   "  novora-storage-audit --interactive")
         return 0
 
-    findings, allow = ns.evaluate(tree, target, esp, uefi)
+    findings, allow = ns.evaluate(tree, target, esp, uefi, allow_fat_esp=args.esp_fat)
     if args.json:
         print(json.dumps({"target": target, "esp": esp, "uefi": uefi,
                           "findings": findings, "approved": allow is not None},

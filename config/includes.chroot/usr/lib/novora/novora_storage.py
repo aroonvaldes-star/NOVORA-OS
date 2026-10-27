@@ -16,6 +16,10 @@ FIELDS = ("NAME,PATH,TYPE,SIZE,MODEL,SERIAL,WWN,TRAN,HOTPLUG,RM,RO,FSTYPE,"
           "MOUNTPOINTS,PTTYPE,PTUUID,PARTTYPE,PARTUUID,PARTLABEL,LOG-SEC,"
           "PHY-SEC,START")
 ESP_TYPES = {"c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"}
+# FAT32 creada por Windows («Nueva partición» / diskpart) en un disco MBR:
+# tipo 0x0b/0x0c en vez de 0xef. Se acepta como partición de arranque del
+# disco externo con aviso (W10); no se cambia el tipo.
+FAT_MBR_TYPES = {"0xb", "0xc", "0x0b", "0x0c"}
 LIVE_MOUNT_PREFIXES = ("/run/live", "/lib/live/mount")
 # Sistemas de archivos que casi siempre contienen datos de Windows/usuario o
 # capas que no deben reformatearse desde este instalador.
@@ -115,6 +119,12 @@ def is_esp(part):
             and part.get("fstype") == "vfat")
 
 
+def is_fat_boot_candidate(disk, part):
+    """FAT32 «normal» en un disco MBR que puede servir de ESP del disco externo."""
+    return (disk.get("pttype") == "dos" and part.get("fstype") == "vfat"
+            and str(part.get("parttype") or "").lower() in FAT_MBR_TYPES)
+
+
 def identity(disk):
     return {
         "serial": (disk.get("serial") or "").strip() or None,
@@ -176,8 +186,11 @@ def find_part(tree, path):
     return None, None
 
 
-def evaluate(tree, target_path, esp_path, uefi):
+def evaluate(tree, target_path, esp_path, uefi, allow_fat_esp=False):
     """Evalúa una selección. Devuelve (hallazgos, allowlist|None).
+
+    allow_fat_esp: aceptar como ESP una FAT32 0x0b/0x0c del mismo disco MBR
+    (solo cuando el usuario lo pide explícitamente: podría tener datos).
 
     hallazgos: lista de (nivel, código, mensaje). allowlist solo se emite si
     no hay ningún BLOCK.
@@ -278,10 +291,18 @@ def evaluate(tree, target_path, esp_path, uefi):
             elif epart is part:
                 add(BLOCK, "B08", "La ESP y la raíz no pueden ser la misma "
                     "partición.")
-            elif not is_esp(epart):
+            elif not is_esp(epart) and not (allow_fat_esp
+                                            and is_fat_boot_candidate(edisk, epart)):
                 add(BLOCK, "B08", f"{esp_path} no es una ESP real (tipo "
                     f"{epart.get('parttype')}, fs {epart.get('fstype')}).")
             else:
+                if not is_esp(epart):
+                    add(WARN, "W10", f"{esp_path} es una FAT32 normal (tipo "
+                        f"{epart.get('parttype')}), no una ESP 0xEF. Los firmwares "
+                        "UEFI suelen arrancar igual un disco USB desde ella "
+                        "(EFI/BOOT/BOOTX64.EFI); si el tuyo no la ve, hay que "
+                        "cambiar el tipo a 0xEF. No se formatea: se conservan "
+                        "sus archivos y se añaden EFI/ y los núcleos.")
                 if mounted_anywhere(epart):
                     add(BLOCK, "B04", f"La ESP {esp_path} está montada.")
                 esp_rec = part_record(epart)

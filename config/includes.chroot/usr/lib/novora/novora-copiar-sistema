@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# NOVORA OS — instala el sistema de la sesión Live en las particiones que el
+# usuario ya preparó en el disco externo (requiere root; lo llama
+# novora-install DESPUÉS de `novora-disk-guard unlock` y `verify`).
+#
+#   destino (p. ej. ext4 de 1 TB)  → LUKS2 (argon2id, sectores de 4096) → ext4 → /
+#   FAT32 del mismo disco (100 GB) → /boot: núcleos, GRUB y EFI/BOOT/BOOTX64.EFI.
+#                                    NO se formatea: se conservan sus archivos.
+#
+# Nunca toca otra partición ni la NVRAM (GRUB va por grub-install-guarded,
+# con --no-nvram). Las particiones se localizan por PARTUUID del allowlist,
+# nunca por /dev/sdX. Si el destino tiene archivos, pide escribir BORRAR.
+#
+# Uso: novora-copiar-sistema --allowlist /run/novora/allowlist.json
+# Variables solo para pruebas: NOVORA_SOURCE_ROOT, NOVORA_TARGET_MNT,
+# NOVORA_CRYPTSETUP, NOVORA_MAPPER_DIR, NOVORA_LUKS_KEYFILE, NOVORA_CHROOT,
+# NOVORA_BLKID, NOVORA_USER, NOVORA_SKIP_BIND, NOVORA_TEST_NO_PASSWD.
+set -Eeuo pipefail
+
+ALLOW=''
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --allowlist) ALLOW="${2:-}"; shift 2 ;;
+    *) echo "Uso: $0 --allowlist ARCHIVO" >&2; exit 1 ;;
+  esac
+done
+[[ -r "${ALLOW}" ]] || { echo "Falta --allowlist legible." >&2; exit 1; }
+
+SRC="${NOVORA_SOURCE_ROOT:-/run/live/rootfs/filesystem.squashfs}"
+MNT="${NOVORA_TARGET_MNT:-/mnt/novora}"
+CRYPT="${NOVORA_CRYPTSETUP:-cryptsetup}"
+MAPPER="${NOVORA_MAPPER_DIR:-/dev/mapper}"
+BLKID="${NOVORA_BLKID:-blkid}"
+NAME=novora-root
+ROOT_DEV="${MAPPER}/${NAME}"
+CHECK="${MNT}.comprobar"
+
+die() { echo "CANCELADO: $*" >&2; exit 4; }
+step() { echo; echo "== $* =="; }
+in_target() {
+  if [[ -n "${NOVORA_CHROOT:-}" ]]; then "${NOVORA_CHROOT}" "${MNT}" "$@"
+  else chroot "${MNT}" "$@"; fi
+}
+
+opened=0
+cleanup() {
+  set +e
+  if [[ -z "${NOVORA_SKIP_BIND:-}" ]]; then
+    for m in run sys/firmware/efi/efivars sys proc dev/pts dev; do
+      mountpoint -q "${MNT}/${m}" && umount -l "${MNT}/${m}"
+    done
+  fi
+  mountpoint -q "${MNT}/boot" && umount "${MNT}/boot"
+  mountpoint -q "${MNT}" && umount "${MNT}"
+  mountpoint -q "${CHECK}" && umount "${CHECK}"
+  [[ "${opened}" -eq 1 ]] && "${CRYPT}" close "${NAME}"
+}
+trap cleanup EXIT
+
+field() {  # field target|esp clave
+  python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1]))[sys.argv[2]]; print(r[sys.argv[3]] if r else "")' \
+    "${ALLOW}" "$1" "$2"
+}
+by_partuuid() {
+  local uuid="$1" devs
+  [[ "${uuid}" =~ ^[0-9a-f-]+$ ]] || die "PARTUUID con caracteres inesperados: ${uuid}"
+  devs="$("${BLKID}" -t "PARTUUID=${uuid}" -o device || true)"
+  [[ -n "${devs}" && "$(wc -l <<<"${devs}")" -eq 1 ]] || die "se esperaba 1 partición con PARTUUID ${uuid}"
+  echo "${devs}"
+}
+
+[[ -d "${SRC}/usr" && -d "${SRC}/etc" ]] || die "no se encuentra el sistema Live en ${SRC}"
+TARGET="$(by_partuuid "$(field target partuuid)")"
+ESP="$(by_partuuid "$(field esp partuuid)")"
+[[ "${TARGET}" != "${ESP}" ]] || die "destino y arranque son la misma partición"
+for dev in "${TARGET}" "${ESP}"; do
+  findmnt -rno TARGET -S "${dev}" >/dev/null && die "${dev} está montada; desmóntala primero"
+done
+[[ "$("${BLKID}" -o value -s TYPE "${ESP}")" == "vfat" ]] || die "${ESP} no es FAT32"
+echo "Sistema:  ${TARGET} (se cifrará con LUKS2; su contenido actual se pierde)"
+echo "Arranque: ${ESP} (FAT32; NO se formatea, se añaden EFI/ y los núcleos)"
+
+step "1/7 Comprobando que el destino no tiene tus archivos"
+mkdir -p "${CHECK}"
+ttype="$("${BLKID}" -o value -s TYPE "${TARGET}" || true)"
+if [[ -n "${ttype}" ]]; then
+  if mount -o ro "${TARGET}" "${CHECK}" 2>/dev/null; then
+    mapfile -t found < <(find "${CHECK}" -mindepth 1 -maxdepth 2 ! -path "${CHECK}/lost+found" | head -n 20)
+    umount "${CHECK}"
+    if [[ ${#found[@]} -gt 0 ]]; then
+      echo "¡ATENCIÓN! ${TARGET} (${ttype}) contiene archivos, por ejemplo:"
+      printf '   %s\n' "${found[@]#"${CHECK}"}"
+      echo "Si continúas se BORRARÁN. Para seguir escribe exactamente: BORRAR"
+      read -r answer
+      [[ "${answer}" == "BORRAR" ]] || die "no confirmado; no se ha escrito nada"
+    else
+      echo "Vacío (${ttype})."
+    fi
+  else
+    die "${TARGET} tiene '${ttype}' y no se pudo montar para comprobarlo"
+  fi
+fi
+mount -o ro "${ESP}" "${CHECK}" || die "no se pudo montar ${ESP}"
+espfree="$(df -B1 --output=avail "${CHECK}" | tail -n 1)"
+[[ -e "${CHECK}/EFI/debian" ]] && echo "AVISO: ${ESP} ya tiene EFI/debian; se reemplazará."
+umount "${CHECK}"
+[[ "${espfree// /}" -ge $((1024 ** 3)) ]] || die "${ESP} tiene menos de 1 GiB libre"
+
+step "2/7 Cifrando ${TARGET} con LUKS2 (elige una contraseña; teclado latam)"
+luks=(luksFormat --type luks2 --pbkdf argon2id --sector-size 4096 --label NOVORA-CIFRADO)
+openopts=(open --type luks2)
+if [[ -n "${NOVORA_LUKS_KEYFILE:-}" ]]; then
+  luks+=(--batch-mode --key-file "${NOVORA_LUKS_KEYFILE}")
+  openopts+=(--key-file "${NOVORA_LUKS_KEYFILE}")
+else
+  luks+=(--verify-passphrase)
+fi
+"${CRYPT}" "${luks[@]}" "${TARGET}"
+"${CRYPT}" "${openopts[@]}" "${TARGET}" "${NAME}"
+opened=1
+mkfs.ext4 -q -F -L NOVORA "${ROOT_DEV}"
+
+step "3/7 Copiando el sistema (puede tardar varios minutos)"
+mkdir -p "${MNT}"
+mount "${ROOT_DEV}" "${MNT}"
+mkdir -p "${MNT}/boot"
+mount -o umask=0077,shortname=winnt "${ESP}" "${MNT}/boot"
+rsync -aHAXx --info=progress2 --exclude=/boot/ "${SRC}/" "${MNT}/"
+# FAT32 no admite enlaces, permisos ni dueños: solo archivos.
+rsync -rt --no-links --omit-dir-times --modify-window=2 "${SRC}/boot/" "${MNT}/boot/"
+for d in dev proc sys run tmp mnt media; do mkdir -p "${MNT}/${d}"; done
+chmod 1777 "${MNT}/tmp"
+
+step "4/7 Configurando arranque cifrado"
+luks_uuid="$("${BLKID}" -o value -s UUID "${TARGET}")"
+root_uuid="$("${BLKID}" -o value -s UUID "${ROOT_DEV}")"
+esp_uuid="$("${BLKID}" -o value -s UUID "${ESP}")"
+[[ -n "${luks_uuid}" && -n "${root_uuid}" && -n "${esp_uuid}" ]] || die "no se pudieron leer los UUID"
+cat > "${MNT}/etc/fstab" <<EOF
+# NOVORA OS — generado por novora-copiar-sistema
+UUID=${root_uuid}  /      ext4  errors=remount-ro  0  1
+UUID=${esp_uuid}  /boot  vfat  umask=0077,shortname=winnt  0  2
+EOF
+cat > "${MNT}/etc/crypttab" <<EOF
+# NOVORA OS: la contraseña se pide al arrancar (teclado latam en el initramfs)
+${NAME}  UUID=${luks_uuid}  none  luks,initramfs
+EOF
+mkdir -p "${MNT}/etc/initramfs-tools/conf.d"
+echo "KEYMAP=y" > "${MNT}/etc/initramfs-tools/conf.d/novora-teclado.conf"
+mkdir -p "${MNT}/etc/timeshift"
+cat > "${MNT}/etc/timeshift/timeshift.json" <<EOF
+{
+  "backup_device_uuid" : "${root_uuid}",
+  "do_first_run" : "false",
+  "btrfs_mode" : "false",
+  "include_btrfs_home_for_backup" : "false",
+  "schedule_monthly" : "false",
+  "schedule_weekly" : "true",
+  "schedule_daily" : "true",
+  "schedule_hourly" : "false",
+  "schedule_boot" : "false",
+  "count_monthly" : "2",
+  "count_weekly" : "3",
+  "count_daily" : "5",
+  "count_hourly" : "6",
+  "count_boot" : "5",
+  "exclude" : [ "/home/**" ]
+}
+EOF
+
+if [[ -z "${NOVORA_SKIP_BIND:-}" ]]; then
+  for m in dev dev/pts proc sys run; do mount --bind "/${m}" "${MNT}/${m}"; done
+  # efivarfs en solo lectura dentro del destino: nada puede tocar la NVRAM.
+  if [[ -d /sys/firmware/efi/efivars ]]; then
+    mount -t efivarfs -o ro efivarfs "${MNT}/sys/firmware/efi/efivars" 2>/dev/null || true
+  fi
+fi
+
+step "5/7 Quitando lo que solo sirve en la sesión Live"
+in_target apt-get purge -y -q live-boot live-boot-initramfs-tools live-config \
+  live-config-systemd calamares calamares-settings-debian || \
+  echo "AVISO: no se pudieron quitar todos los paquetes Live (no impide arrancar)."
+
+step "6/7 Tu cuenta"
+user="${NOVORA_USER:-}"
+while [[ -z "${user}" ]]; do
+  read -r -p "Nombre de usuario (minúsculas, sin espacios): " user
+  [[ "${user}" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || { echo "Nombre no válido."; user=''; }
+done
+[[ "${user}" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "nombre de usuario no válido"
+groups=()
+for g in sudo adm cdrom audio video plugdev netdev lpadmin render kvm; do
+  in_target getent group "${g}" >/dev/null && groups+=("${g}")
+done
+in_target useradd -m -s /bin/bash -G "$(IFS=,; echo "${groups[*]}")" "${user}"
+if [[ -z "${NOVORA_TEST_NO_PASSWD:-}" ]]; then
+  until in_target passwd "${user}"; do echo "Inténtalo otra vez."; done
+fi
+
+step "7/7 Instalando el arranque (sin tocar la NVRAM ni el disco de Windows)"
+in_target update-initramfs -u -k all
+# bootloader-id=debian: el grubx64.efi FIRMADO de Debian busca su grub.cfg
+# en EFI/debian; con otro nombre, Secure Boot dejaría GRUB sin menú.
+in_target env NOVORA_REAL_GRUB_INSTALL=/usr/sbin/grub-install /usr/lib/novora/grub-install-guarded \
+  --target=x86_64-efi --efi-directory=/boot --boot-directory=/boot --bootloader-id=debian
+in_target update-grub
+# Ruta extraíble (la que usa el menú de arranque sin entrada NVRAM): el GRUB
+# de EFI/BOOT también necesita el grub.cfg que apunta a /grub.
+if [[ -f "${MNT}/boot/EFI/debian/grub.cfg" && ! -f "${MNT}/boot/EFI/BOOT/grub.cfg" ]]; then
+  cp "${MNT}/boot/EFI/debian/grub.cfg" "${MNT}/boot/EFI/BOOT/grub.cfg"
+fi
+[[ -f "${MNT}/boot/EFI/BOOT/BOOTX64.EFI" ]] || die "no se creó EFI/BOOT/BOOTX64.EFI"
+
+echo
+echo "Instalación terminada en ${TARGET} (cifrado) con arranque en ${ESP}."
+echo "Para arrancar NOVORA OS: menú de arranque del firmware (F12/F9/Esc) → el disco externo."
+echo "Windows sigue arrancando como siempre si no eliges el disco externo."

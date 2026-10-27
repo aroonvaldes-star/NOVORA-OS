@@ -8,7 +8,8 @@ echo "== Sintaxis =="
 for f in "${HERE}/../scripts/build-iso.sh" "${HERE}"/*.sh; do bash -n "$f" || rc=1; done
 if command -v shellcheck >/dev/null; then
   shellcheck -s bash "${HERE}/../scripts/build-iso.sh" "${HERE}"/*.sh \
-    "${HERE}/../config/includes.chroot/usr/local/sbin/novora-install" || rc=1
+    "${HERE}/../config/includes.chroot/usr/local/sbin/novora-install" \
+    "${HERE}/../config/includes.chroot/usr/lib/novora/novora-copiar-sistema" || rc=1
   shellcheck -s sh "${HERE}"/../config/includes.chroot/usr/lib/novora/{novora-udev-ro,grub-install-guarded,efibootmgr-readonly} \
     "${HERE}"/../config/hooks/normal/*.hook.chroot || rc=1
   shellcheck "${HERE}/../scripts/add-atlas-model.sh" \
@@ -27,6 +28,8 @@ echo "== Envoltorios de Calamares y build-iso.sh simulado =="
 bash "${HERE}/test_wrappers_and_build.sh" || rc=1
 echo "== Guardián sobre discos virtuales loop (kernel real) =="
 bash "${HERE}/test_guard_loop.sh"; r=$?; [[ $r -eq 0 || $r -eq 77 ]] || rc=1
+echo "== Instalador sobre un Seagate virtual (LUKS2 real, chroot simulado) =="
+bash "${HERE}/test_instalador_loop.sh"; r=$?; [[ $r -eq 0 || $r -eq 77 ]] || rc=1
 find "${HERE}/.." -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
 echo; [[ $rc -eq 0 ]] && echo "TODAS LAS PRUEBAS PASARON" || echo "HAY PRUEBAS FALLIDAS"
 exit $rc
